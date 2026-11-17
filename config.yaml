@@ -16,6 +16,7 @@ audio:
   hostapi: "Windows WASAPI"
   input_device_name: "Микрофон (fifine SC3)"
   input_fallback_name: "Микрофон (fifine SC3)"
+  input_gain: 1.0               # входной гейн: 1.0 = без усиления, 4.0 = x4
   output_device_name: "Наушники (2- Temple Pro Purple)"
   capture_samplerate: 48000
   target_samplerate: 16000

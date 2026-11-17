@@ -61,6 +61,7 @@ class AudioConfig(BaseModel):
     hostapi: str = "Windows WASAPI"
     input_device_name: str
     input_fallback_name: str = ""
+    input_gain: float = Field(default=1.0, gt=0)
     output_device_name: str
     capture_samplerate: int = Field(default=48000, gt=0)
     target_samplerate: int = Field(default=16000, gt=0)

@@ -34,6 +34,7 @@ class AudioCapture:
         self.block_frames = int(audio.block_frames)
         self.device_index = int(device_index)
         self.ring_seconds = float(ring_seconds)
+        self.input_gain = float(audio.input_gain)
 
         self._capacity = int(self.samplerate * self.ring_seconds)  # 48000 сэмплов = 1 с
         self._buffer = np.zeros(self._capacity, dtype=np.int16)
@@ -112,6 +113,19 @@ class AudioCapture:
         self._read_total += count
         return block
 
+    def _apply_gain(self, block: np.ndarray) -> np.ndarray:
+        """Входной гейн: int16 -> float, усиление, мягкий лимитер -> int16.
+
+        Применяется к каждому выданному блоку и к pre-roll, поэтому VAD и Recorder
+        получают одинаково усиленный сигнал.
+        """
+        if self.input_gain == 1.0:
+            return block
+        a = block.astype(np.float32) / 32768.0
+        a = a * self.input_gain
+        a = np.clip(a, -0.99, 0.99)  # мягкий лимитер, без переполнения int16
+        return np.round(a * 32768.0).astype(np.int16)
+
     # --- публичный интерфейс ---
 
     def start(self) -> None:
@@ -140,6 +154,7 @@ class AudioCapture:
             ) from exc
         self._stream = stream
         self._running.set()
+        logger.info("input_gain = {}", self.input_gain)
         logger.debug(
             "Захват запущен: device={} {} Гц, блок {} сэмплов ({} мс)",
             self.device_index,
@@ -188,7 +203,7 @@ class AudioCapture:
                 if remaining <= 0:
                     return None
                 self._data_ready.wait(remaining)
-            return self._read_locked(frames)
+            return self._apply_gain(self._read_locked(frames))
 
     def snapshot(self, milliseconds: float) -> np.ndarray:
         """Последние `milliseconds` мс из кольцевого буфера. Данные не потребляет.
@@ -204,9 +219,13 @@ class AudioCapture:
             start = (self._write_pos - count) % self._capacity
             end = start + count
             if end <= self._capacity:
-                return self._buffer[start:end].copy()
-            first = self._capacity - start
-            return np.concatenate((self._buffer[start:], self._buffer[: count - first]))
+                block = self._buffer[start:end].copy()
+            else:
+                first = self._capacity - start
+                block = np.concatenate(
+                    (self._buffer[start:], self._buffer[: count - first])
+                )
+            return self._apply_gain(block)
 
     @property
     def is_running(self) -> bool:
