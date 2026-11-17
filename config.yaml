@@ -1,0 +1,87 @@
+user:
+  name: Алексей
+  aliases: [Лёша, Лёха, Лёшенька, Зайка, Солнце]
+  timezone: "УТОЧНИТЬ"          # ← нужен город
+  address_as: "Лёша"
+
+persona:
+  name: Киви
+  wake_names: [киви]            # меняется на ходу
+  style: тёплая подруга, на «ты», лёгкий юмор, коротко
+  proactive: true
+  speak_over_media: true
+  duck_music_to: 0.2
+
+audio:
+  input_device: "1"
+  output_device: "6"
+  aec: false
+  vad_end_silence_ms: 400
+  barge_in_ms: 250
+  mute_hotkey: "Ctrl+Alt+M"
+  push_to_talk: "Ctrl+Space"
+
+stt:
+  engine: faster-whisper
+  model: large-v3-turbo
+  compute_type: int8_float16
+  language: ru
+
+speaker:
+  enabled: true
+  gate: tools_only              # чужие болтать могут
+  threshold: 0.65
+
+brain:
+  local: {model: qwen3-14b-instruct-q4_k_m, ctx: 8192, gpu_layers: all}
+  cloud:
+    base_url: "УТОЧНИТЬ_АГРЕГАТОР"
+    tier_cheap: "УТОЧНИТЬ"      # интенты, память, короткие ответы
+    tier_coder: "УТОЧНИТЬ"      # игры, код, агентные циклы
+    tier_vision: "УТОЧНИТЬ"     # скриншоты
+  routing:
+    local_for: [болтовня, управление_пк, музыка, простые_вопросы]
+    cloud_for: [код, агентные_задачи, зрение, сложный_анализ]
+  language_switch: voice_command
+
+budget:
+  brain_monthly_rub: 3000
+  voice_monthly_rub: 800
+  on_exceed: fallback_local_and_warn
+
+tts:
+  primary: azure_multilingual
+  fallback: xtts_v2
+  voice_id: "ВЫБРАТЬ_ПОСЛЕ_BAKEOFF"
+  streaming: true
+
+lipsync:
+  mode: phoneme
+  method: forced_alignment
+  viseme_map: {a: aa, i: ih, u: ou, e: ee, o: oh}
+  crossfade_ms: 70
+
+avatar:
+  model: "ВЫБРАТЬ_VRM"
+  framing: full_body
+  monitor: 1
+  always_on_top: true
+  click_through: true
+  hide_in_games: true
+
+safety:
+  confirm: [delete, overwrite_outside_workspace, terminal_outside_workspace,
+            install, send_email, purchase, password]
+  confirm_mode: voice_yes_and_screen_card
+  mass_delete_threshold: 5      # >5 файлов — только клик, не голос
+  sandbox: D:\Kivi\workspace
+  trash_only: true
+  git_checkpoint: true
+
+skills:
+  browser: {engine: chrome_extension, actions: read_and_act}
+  vision: {mode: on_demand}
+  music: {provider: yandex_desktop, control: smtc, search: unofficial_api}
+  telegram: {remote_commands: true, armed: false, whitelist: [ТВОЙ_USER_ID]}
+  home: {adapters: [tuya, yandex], ha: later}
+  rag: {scan: inventory_first, graph: true, graph_model: local, ocr: lazy}

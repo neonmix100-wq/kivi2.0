@@ -1,0 +1,12 @@
+sounddevice
+soundfile
+numpy
+onnxruntime
+requests
+loguru
+pydantic
+pydantic-settings
+pyyaml
+python-dotenv
+psutil
+nvidia-ml-py
