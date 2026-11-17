@@ -1,0 +1,6 @@
+Always read AGENTS.md and config.yaml before starting any task.
+Treat them as hard constraints, not suggestions.
+Never read, print or modify .env.
+Work only inside D:\Kivi. Never request admin rights.
+Python is 3.12 in .venv. Never install torch at this stage.
+Reply in Russian. Explain what to run and what I should see.
