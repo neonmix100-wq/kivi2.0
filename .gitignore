@@ -5,4 +5,4 @@ __pycache__/
 *.pyc
 *.wav
 node_modules/
-workspace/workspace/
+workspace/

@@ -9,4 +9,5 @@ pydantic-settings
 pyyaml
 python-dotenv
 psutil
-nvidia-ml-pysoxr
+nvidia-ml-py
+soxr
