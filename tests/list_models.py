@@ -12,9 +12,9 @@ if r.status_code != 200:
 
 ids = sorted(m["id"] for m in r.json().get("data", []))
 print("Всего моделей:", len(ids))
-for kw in ["deepseek", "hydrogen", "sonnet", "terra",
-           "speech", "tts", "gigaam", "whisper", "minimax"]:
+for kw in ["v4.1", "deepseek", "hydrogen", "sonnet", "terra",
+           "speech", "tts", "eleven", "voice", "mai", "gigaam", "whisper"]:
     hits = [i for i in ids if kw in i.lower()]
     print(f"\n=== {kw} ({len(hits)}) ===")
-    for i in hits[:12]:
+    for i in hits[:30]:
         print("  ", i)

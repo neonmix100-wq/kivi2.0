@@ -13,11 +13,20 @@ persona:
   duck_music_to: 0.2
 
 audio:
-  input_device: "1"
-  output_device: "6"
+  hostapi: "Windows WASAPI"
+  input_device_name: "Микрофон (fifine SC3)"
+  input_fallback_name: "Микрофон (fifine SC3)"
+  output_device_name: "Наушники (2- Temple Pro Purple)"
+  capture_samplerate: 48000
+  target_samplerate: 16000
+  playback_samplerate: 48000
+  resampler: soxr
+  channels: 1
+  block_ms: 32
   aec: false
   vad_end_silence_ms: 400
   barge_in_ms: 250
+  pre_roll_ms: 300
   mute_hotkey: "Ctrl+Alt+M"
   push_to_talk: "Ctrl+Space"
 
@@ -50,10 +59,12 @@ budget:
   on_exceed: fallback_local_and_warn
 
 tts:
-  primary: azure_multilingual
-  fallback: xtts_v2
-  voice_id: "ВЫБРАТЬ_ПОСЛЕ_BAKEOFF"
+  primary: polza_gemini
+  model: "google/gemini-3.8-flash-tts"
+  voice: "Leda"
   streaming: true
+  base64_response: true
+  audio_format: mp3
 
 lipsync:
   mode: phoneme
