@@ -32,10 +32,20 @@ audio:
   push_to_talk: "Ctrl+Space"
 
 stt:
-  engine: faster-whisper
+  primary: local                # faster-whisper на CUDA (при недоступности — CPU)
+  fallback: polza               # при исключении локального движка — облако
   model: large-v3-turbo
   compute_type: int8_float16
   language: ru
+  beam_size: 1
+
+memory:
+  enabled: true
+  vault_path: "memory"
+  reflect_every_turns: 20
+  reflect_on_idle_min: 10
+  retrieve_k: 4
+  embed_model: "bge-multilingual-gemma2"
 
 speaker:
   enabled: true

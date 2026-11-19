@@ -191,7 +191,27 @@ class VAD:
         self._speech_run = 0
         self._silence_run = 0
         self.last_prob = 0.0
-        self._resampler.clear()
+        if self._resampler is not None:
+            self._resampler.clear()
+
+    def release(self) -> None:
+        """Освободить кэшированный nanobind-объект soxr (утечка при выходе).
+
+        Вызывать только при завершении работы: после release() детектор
+        непригоден, resampler уже не восстановить.
+        """
+        import gc
+
+        self._resampler, resampler = None, self._resampler
+        if resampler is not None:
+            try:
+                resampler.clear()
+            except Exception:  # noqa: BLE001 - объект мог быть уже освобождён
+                pass
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._state = np.zeros(STATE_SHAPE, dtype=np.float32)
+        gc.collect()
+        logger.debug("VAD: soxr-ресемплер освобождён")
 
     # --- внутреннее ---
 

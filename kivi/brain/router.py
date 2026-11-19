@@ -161,6 +161,62 @@ class Router:
         start_tier = route if route in self.tiers else "cheap"
         return self._escalate(prepared, start_tier, task, verify, tools)
 
+    def complete_stream(
+        self,
+        messages: str | list[dict] | dict,
+        task_type: str = "chat",
+    ):
+        """Стрим ответа текстом. Бюджет пишется один раз в конце, эскалации нет."""
+        task = str(task_type).strip().lower()
+        if task not in TASK_TYPES:
+            raise ValueError(
+                f"Router: неизвестный task_type={task_type!r}, ожидалось одно из {TASK_TYPES}"
+            )
+        prepared = self._prepare(messages)
+        route = str(self.routing.get(task, "cheap"))
+        tier = route if route in self.tiers else "cheap"
+        model = self.tiers.get(tier)
+        if not model:
+            raise RouterError(f"тир {tier} не настроен в brain.tiers", tier=tier)
+
+        self._ensure_budget()
+        logger.info("Router stream: task={} -> тир {} ({})", task, tier, model)
+
+        stream_usage = None
+        collected: list[str] = []
+        try:
+            generator = self.provider.stream(prepared, model)
+            while True:
+                try:
+                    piece = next(generator)
+                except StopIteration as stop:
+                    stream_usage = stop.value
+                    break
+                collected.append(piece)
+                yield piece
+        finally:
+            text = "".join(collected)
+            tokens_in = int(getattr(stream_usage, "tokens_in", 0) or 0)
+            tokens_out = int(getattr(stream_usage, "tokens_out", 0) or 0)
+            cost = getattr(stream_usage, "cost_rub", None)
+            if not tokens_out:
+                tokens_out = max(1, len(text) // 3)
+            if not tokens_in:
+                tokens_in = max(1, len(str(prepared)) // 4)
+            written = self.budget.record(
+                provider=self.provider.name,
+                model=model,
+                task_type=task,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_rub=cost,
+                ok=bool(text.strip()),
+                attempt=1,
+            )
+            logger.debug(
+                "Router stream: бюджет записан — {} ток., {:.6f} руб", tokens_out, written
+            )
+
     def _ensure_budget(self) -> None:
         """Перед каждым платным вызовом: лимит не исчерпан?"""
         if not self.budget.check():

@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import requests
 from dotenv import load_dotenv
@@ -36,6 +39,16 @@ class ProviderUnavailable(RuntimeError):
 
 class ProviderError(RuntimeError):
     """Провайдер ответил ошибкой или мусором."""
+
+
+@dataclass(frozen=True)
+class StreamUsage:
+    """Расход одного стримингового запроса."""
+
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_rub: float | None = None
+    estimated: bool = False
 
 
 def _credentials() -> tuple[str, str]:
@@ -120,6 +133,102 @@ class PolzaProvider:
             "cost_rub": float(cost) if cost is not None else None,
             "raw": body,
         }
+
+    def stream(
+        self,
+        messages: list[dict],
+        model: str,
+        *,
+        timeout: float | None = None,
+    ) -> Iterator[str]:
+        """SSE-стрим ответа: yield дельт текста, в конце return StreamUsage."""
+        _, key = _credentials()
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        logger.debug("Polza stream: model={}, сообщений={}", model, len(messages))
+
+        collected: list[str] = []
+        usage_raw: dict | None = None
+
+        try:
+            response = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {key}"},
+                json=payload,
+                timeout=timeout if timeout is not None else self.timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise ProviderUnavailable(f"нет связи с {url}: {exc}") from exc
+
+        try:
+            if response.status_code in RETRYABLE_STATUSES:
+                raise ProviderUnavailable(
+                    f"HTTP {response.status_code} от {url}: {response.text[:200]}"
+                )
+            if response.status_code != 200:
+                raise ProviderError(
+                    f"HTTP {response.status_code} от {url}: {response.text[:200]}"
+                )
+
+            for raw_line in response.iter_lines(decode_unicode=False):
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.debug("Polza stream: пропускаю не-JSON строку: {}", line[:120])
+                    continue
+
+                if isinstance(event, dict) and event.get("usage"):
+                    usage_raw = event["usage"]
+
+                choices = (event or {}).get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    collected.append(piece)
+                    yield piece
+        finally:
+            try:
+                response.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        text = "".join(collected)
+        if usage_raw is None:
+            tokens_in = max(1, len(str(messages)) // 4)
+            tokens_out = max(1, len(text) // 3)
+            logger.warning(
+                "Polza stream: usage не пришёл — оценил по длине текста "
+                "(in={}, out={}); расход будет примерным",
+                tokens_in,
+                tokens_out,
+            )
+            return StreamUsage(tokens_in, tokens_out, None, estimated=True)
+
+        cost = usage_raw.get("cost_rub")
+        if cost is None:
+            cost = usage_raw.get("cost")
+        return StreamUsage(
+            tokens_in=int(usage_raw.get("prompt_tokens") or 0),
+            tokens_out=int(usage_raw.get("completion_tokens") or 0),
+            cost_rub=float(cost) if cost is not None else None,
+            estimated=False,
+        )
 
 
 class OpenCodeCLI:

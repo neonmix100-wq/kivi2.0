@@ -178,6 +178,10 @@ class AudioCapture:
                 stream.close()
             except Exception:  # noqa: BLE001
                 pass
+        # Отпускаем numpy-буферы, чтобы не тянуть память при выходе процесса.
+        import gc
+
+        gc.collect()
         logger.debug(
             "Захват остановлен: xruns={}, потеряно_блоков={}, переполнений={}",
             self._xruns,

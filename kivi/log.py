@@ -16,7 +16,15 @@ from pathlib import Path
 
 from loguru import logger
 
-__all__ = ["LOG_DIR", "LOG_FILE", "PROJECT_ROOT", "logger", "setup_logging"]
+__all__ = [
+    "LOG_DIR",
+    "LOG_FILE",
+    "PROJECT_ROOT",
+    "handler_count",
+    "is_configured",
+    "logger",
+    "setup_logging",
+]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
@@ -29,17 +37,35 @@ FILE_FORMAT = (
     "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <7} | {name}:{function}:{line} | {message}"
 )
 
-_configured = False
+_CONFIGURED = False
+
+
+def is_configured() -> bool:
+    """Настроен ли логгер (для проверок идемпотентности)."""
+    return _CONFIGURED
+
+
+def handler_count() -> int:
+    """Сколько хендлеров сейчас у loguru (должно быть 2: консоль и файл)."""
+    try:
+        from loguru import logger as _loguru
+
+        return len(_loguru._core.handlers)  # noqa: SLF001 - другого API нет
+    except Exception:  # noqa: BLE001
+        return -1
 
 
 def setup_logging(console_level: str = "INFO", file_level: str = "DEBUG") -> None:
     """DEBUG -> data/logs/kivi.log (ротация 10 МБ), INFO -> консоль.
 
+    Идемпотентна: повторный вызов (в т.ч. после повторного импорта) не добавляет
+    второй хендлер и не дублирует строки в файле.
+
     Цвета в консоли выключены по умолчанию, чтобы в обычном окне PowerShell
     не появлялись служебные последовательности. Включить: KIVI_LOG_COLOR=1.
     """
-    global _configured
-    if _configured:
+    global _CONFIGURED
+    if _CONFIGURED:
         return
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,7 +78,8 @@ def setup_logging(console_level: str = "INFO", file_level: str = "DEBUG") -> Non
 
     colorize = os.environ.get("KIVI_LOG_COLOR", "").strip() in {"1", "true", "yes"}
 
-    logger.remove()  # убираем стандартный обработчик loguru (DEBUG в stderr)
+    # Убираем все прошлые хендлеры (стандартный loguru + возможные дубли).
+    logger.remove()
     logger.add(
         sys.stderr,
         level=console_level,
@@ -72,7 +99,7 @@ def setup_logging(console_level: str = "INFO", file_level: str = "DEBUG") -> Non
         backtrace=True,
         diagnose=False,
     )
-    _configured = True
+    _CONFIGURED = True
 
 
 # Настраиваем при импорте: `from kivi.log import logger` всегда готов к работе.
