@@ -219,7 +219,10 @@ def main() -> int:
         # mock: всё в тестовой БД, боевая не участвует
         budget = Budget(settings, db_path=TEST_DB)
         spent_before = budget.month_spent_rub()
-    router = Router(settings, budget=budget, provider=provider)
+    # В mock-режиме не зовём настоящий opencode: имя, которого нет в PATH,
+    # проверяет штатную эскалацию в облако и не тратит время на CLI.
+    cli = None if args.live else OpenCodeCLI(executable="opencode-mock-missing")
+    router = Router(settings, budget=budget, provider=provider, cli=cli)
     print(f"\nКонфиг: tiers={router.tiers}")
     print(f"        routing={router.routing}, escalation={router.escalation}")
     print(f"        бюджет: {router.budget.describe()}")

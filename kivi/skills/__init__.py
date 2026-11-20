@@ -6,8 +6,15 @@
 """
 
 from kivi.skills.broker import PermissionDenied, SkillContext
+from kivi.skills.gaps import GapLog, get_gap_log
+from kivi.skills.llm_planner import build_catalog, parse_response, plan_with_llm
 from kivi.skills.loader import SkillLoadError, invoke, load
-from kivi.skills.planner import DEFAULT_MIN_SCORE, Planner
+from kivi.skills.planner import (
+    DEFAULT_MIN_SCORE,
+    STRATEGIES,
+    Planner,
+    get_top_gaps,
+)
 from kivi.skills.registry import (
     SkillManifest,
     SkillPermissions,
@@ -21,6 +28,8 @@ from kivi.skills.registry import (
 
 __all__ = [
     "DEFAULT_MIN_SCORE",
+    "STRATEGIES",
+    "GapLog",
     "PermissionDenied",
     "Planner",
     "SkillContext",
@@ -31,9 +40,14 @@ __all__ = [
     "SkillRequires",
     "SkillSource",
     "SkillStats",
+    "build_catalog",
+    "get_gap_log",
     "get_registry",
+    "get_top_gaps",
     "invoke",
     "load",
     "load_skills_config",
+    "parse_response",
+    "plan_with_llm",
 ]
 

@@ -5,9 +5,9 @@
       имя + команда   -> THINKING (one-shot)
       только имя      -> сказать «Слушаю», открыть окно 8 с на команду без имени
       нет имени       -> IDLE, молча
-    THINKING -> planner.plan(command)
-      скилл найден    -> loader.invoke -> SPEAKING (Router не зовём)
-      скилла нет      -> Router.complete(task_type="chat") -> SPEAKING
+    THINKING -> planner.plan(command)   # LLM-планировщик + difflib-фолбэк
+      умение найдено  -> loader.invoke -> SPEAKING (Router не зовём)
+      умения нет      -> «Пока не умею: X» + Router.chat о пробеле -> SPEAKING
 
 Никаких облачных вызовов для проверки имени: распознаёт локальный faster-whisper.
 Каждое распознанное высказывание пишется в data/logs/wake.log.
@@ -170,8 +170,8 @@ class WakeLoop:
             except Exception as exc:  # noqa: BLE001 - память не должна блокировать запуск
                 logger.warning("Память: рефлексия недоступна: {}", exc)
 
-        # Скиллы: реестр + планировщик. Битые манифесты просто пропускаются,
-        # и команда уходит в Router как раньше.
+        # Умения: реестр + планировщик (LLM-first, difflib как фолбэк).
+        # Битые манифесты просто пропускаются, и команда уходит в Router как раньше.
         self.skills: SkillRegistry | None = None
         self.planner: Planner | None = None
         try:
@@ -181,7 +181,8 @@ class WakeLoop:
             registry = _SkillRegistry.from_config(self.settings.section("skills"))
             registry.scan()
             self.skills = registry
-            self.planner = _Planner(registry)
+            # Тот же router: в dry-run смоуке планировщик ничего не потратит.
+            self.planner = _Planner(registry, router=router)
         except Exception as exc:  # noqa: BLE001 - скиллы не должны блокировать запуск
             logger.warning("Скиллы: недоступны: {}: {}", type(exc).__name__, exc)
 
@@ -373,14 +374,20 @@ class WakeLoop:
         started = time.perf_counter()
         session = self._get_session()
 
-        # --- скиллы: если команда совпала с триггером — отвечаем без LLM ---
-        plan = self._plan_skill(command)
-        if plan is not None:
+        # --- умения: LLM-планировщик (+difflib-фолбэк), Router не зовём ---
+        plan = self._plan_skill(command, session.history())
+        if plan is not None and plan.get("skill") is not None:
             self._run_skill(command, plan["skill"], plan.get("args") or {})
             return
 
+        notice = self._missing_notice(plan)
+        if notice:
+            wake_log.info("THINKING: пробел в умениях — {!r}", notice)
+            self._say(notice)
+
         memory = self._memory_block(command)
-        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
+        hint = self._gap_hint(plan)
+        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "") + hint
         messages = (
             [{"role": "system", "content": system_text}]
             + session.history()
@@ -441,15 +448,60 @@ class WakeLoop:
 
     # --- скиллы ---
 
-    def _plan_skill(self, command: str) -> dict | None:
-        """План скилла под команду. None — скилла нет, дальше Router (LLM)."""
+    def _plan_skill(
+        self, command: str, history: list[dict] | None = None
+    ) -> dict | None:
+        """План умения под команду. None — планировщик недоступен или упал."""
         if self.planner is None:
             return None
-        plan = self.planner.plan(command)
-        if plan.get("skill") is None:
-            wake_log.info("скилл не найден -> LLM: {!r}", command)
+        try:
+            plan = self.planner.plan(command, history=history)
+        except Exception as exc:  # noqa: BLE001 - планировщик не должен ронять цикл
+            wake_log.warning("планировщик упал: {}: {}", type(exc).__name__, exc)
             return None
+        if plan.get("skill") is not None:
+            wake_log.info(
+                "планировщик: умение {} (источник {})",
+                plan["skill"].name,
+                plan.get("source"),
+            )
+        else:
+            wake_log.info(
+                "планировщик: умения нет (источник {}), пробел записан",
+                plan.get("source"),
+            )
         return plan
+
+    @staticmethod
+    def _missing_notice(plan: dict | None) -> str:
+        """Короткая фраза «Пока не умею: X» для озвучки (пусто, если умение есть)."""
+        if not plan or plan.get("skill") is not None:
+            return ""
+        missing = plan.get("missing") or []
+        if not missing:
+            return ""
+        capability = str(missing[0].get("capability") or "").strip()
+        if not capability:
+            return ""
+        if len(capability) > 60:
+            capability = capability[:57].rstrip() + "…"
+        return f"Пока не умею: {capability}."
+
+    @staticmethod
+    def _gap_hint(plan: dict | None) -> str:
+        """Подсказка модели: чего просит пользователь, а умения пока нет."""
+        if not plan or plan.get("skill") is not None:
+            return ""
+        missing = plan.get("missing") or []
+        if not missing:
+            return ""
+        capability = str(missing[0].get("capability") or "").strip()
+        if not capability:
+            return ""
+        return (
+            "\n\nУмения под эту просьбу пока нет: "
+            f"{capability[:120]}. Скажи честно и коротко, что пока не умеешь."
+        )
 
     def _run_skill(self, command: str, manifest: SkillManifest, args: dict) -> None:
         """Выполнить скилл: озвучить ответ и записать реплики. Router не зовём."""

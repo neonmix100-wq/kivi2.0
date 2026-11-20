@@ -164,7 +164,7 @@ def main() -> int:
     )
 
     print("\n--- 2) planner ---")
-    planner = Planner(registry)
+    planner = Planner(registry, strategy="fuzzy_only")  # смоук без сети и LLM
     found = planner.match("который час сейчас")
     ok &= check(
         "'который час сейчас' -> time_date",
