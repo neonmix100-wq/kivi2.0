@@ -7,3 +7,4 @@ __pycache__/
 node_modules/
 workspace/
 skills/installed/
+data/opencode_jobs/

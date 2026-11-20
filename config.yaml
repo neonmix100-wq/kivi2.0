@@ -54,6 +54,7 @@ speaker:
 
 brain:
   orchestrator: "deepseek/deepseek-v4.1-flash-1017"
+  opencode_workdir: "data/opencode_jobs"   # папка задач CLI: подпапка <uuid8> на запрос
   tiers:
     cheap: "deepseek/deepseek-v4.1-flash-1017"
     coder: "google/gemini-4-hydrogen"

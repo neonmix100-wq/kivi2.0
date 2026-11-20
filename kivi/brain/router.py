@@ -21,7 +21,7 @@ from kivi.brain.providers import (
     ProviderError,
     ProviderUnavailable,
 )
-from kivi.config import PROJECT_ROOT, Settings, get_settings
+from kivi.config import Settings, get_settings
 from kivi.log import logger
 
 __all__ = ["Router", "RouterError", "TASK_TYPES"]
@@ -98,20 +98,15 @@ class Router:
         self.budget = budget if budget is not None else Budget(self.settings)
         self.provider = provider if provider is not None else PolzaProvider()
         self.cli = cli if cli is not None else OpenCodeCLI()
-        self.workdir = Path(workdir) if workdir is not None else self._default_workdir()
+        # None — папку задачи создаёт OpenCodeCLI в brain.opencode_workdir
+        # (data/opencode_jobs/<uuid8>), чтобы каждая задача шла в своей папке.
+        self.workdir = Path(workdir) if workdir is not None else None
         logger.info(
             "Router готов: tiers={}, routing={}, бюджет: {}",
             self.tiers,
             self.routing,
             self.budget.describe(),
         )
-
-    def _default_workdir(self) -> Path:
-        """Папка для opencode: safety.sandbox из конфига, иначе корень проекта."""
-        sandbox = str(self.settings.section("safety").get("sandbox") or "").strip()
-        if sandbox:
-            return Path(sandbox)
-        return PROJECT_ROOT
 
     @staticmethod
     def _prepare(messages: str | list[dict] | dict) -> list[dict]:

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -20,16 +23,21 @@ from dotenv import load_dotenv
 from kivi.log import logger
 
 __all__ = [
+    "DEFAULT_OPCODE_WORKDIR",
     "OPCODE_TIMEOUT",
     "OpenCodeCLI",
     "PolzaProvider",
     "ProviderError",
     "ProviderUnavailable",
+    "clean_opencode_stdout",
 ]
 
 RETRYABLE_STATUSES = {402, 429, 503}  # нет денег / лимит / сервис недоступен
 OPCODE_TIMEOUT = 600.0
 OPCODE_BIN = "opencode"
+DEFAULT_OPCODE_WORKDIR = "data/opencode_jobs"
+SERVICE_LINE_PREFIXES = ("> ", "$ ")  # приглашение и эхо команды самого CLI
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 DEFAULT_TIMEOUT = 120.0
 
 
@@ -231,69 +239,190 @@ class PolzaProvider:
         )
 
 
+# --- opencode CLI: вспомогательное ---
+
+
+def _strip_ansi(text: str) -> str:
+    """Убрать ANSI-цвета: они лезут в stderr CLI и портят текст ошибок."""
+    return _ANSI_RE.sub("", text)
+
+
+def _as_text(value: str | bytes | None) -> str:
+    """stdout/stderr как строка (bytes бывают при ручном запуске и в моках)."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def clean_opencode_stdout(raw: str | bytes | None) -> str:
+    """Ответ модели из stdout: без служебных строк ("> ", "$ ") и пустых краёв."""
+    text = _strip_ansi(_as_text(raw)).replace("\r\n", "\n").replace("\r", "\n")
+    kept: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith(SERVICE_LINE_PREFIXES) or stripped in (">", "$"):
+            continue  # приглашение/эхо команды — не ответ
+        kept.append(line.rstrip())
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept)
+
+
+def _jobs_root_from_config() -> Path:
+    """Папка задач: brain.opencode_workdir из config.yaml, иначе data/opencode_jobs."""
+    root = Path(__file__).resolve().parents[2]
+    raw = ""
+    try:
+        from kivi.config import PROJECT_ROOT, load_config
+
+        root = PROJECT_ROOT
+        brain = load_config().model_dump().get("brain") or {}
+        raw = str(brain.get("opencode_workdir") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - конфиг не должен валить провайдера
+        logger.debug(
+            "opencode: brain.opencode_workdir не прочитан ({}), беру {}",
+            exc,
+            DEFAULT_OPCODE_WORKDIR,
+        )
+    path = Path(raw) if raw else Path(DEFAULT_OPCODE_WORKDIR)
+    return path if path.is_absolute() else root / path
+
+
+def _resolve_executable(name: str) -> str | None:
+    """Путь к исполняемому файлу.
+
+    На Windows npm ставит рядом .cmd-обёртку: CreateProcess не запускает .cmd по
+    «голому» имени, поэтому предпочитаем файл с расширением.
+    """
+    if os.name == "nt":
+        for suffix in (".cmd", ".exe", ".bat"):
+            found = shutil.which(name + suffix)
+            if found:
+                return found
+    return shutil.which(name)
+
+
 class OpenCodeCLI:
-    """Локальный агент opencode: `opencode run <prompt>` в указанной папке."""
+    """Локальный агент opencode: `opencode run <prompt>` в папке задачи.
+
+    Папка задачи по умолчанию — brain.opencode_workdir/<uuid8>, то есть
+    data/opencode_jobs/<uuid8>: у каждой задачи свой рабочий каталог.
+    """
 
     name = "opencode_cli"
 
     def __init__(
-        self, *, executable: str = OPCODE_BIN, timeout: float = OPCODE_TIMEOUT
+        self,
+        *,
+        executable: str = OPCODE_BIN,
+        timeout: float = OPCODE_TIMEOUT,
+        jobs_root: str | Path | None = None,
     ) -> None:
         self.executable = executable
         self.timeout = float(timeout)
+        self.jobs_root = (
+            Path(jobs_root) if jobs_root is not None else _jobs_root_from_config()
+        )
 
     @property
     def available(self) -> bool:
-        return shutil.which(self.executable) is not None
+        return _resolve_executable(self.executable) is not None
 
-    def complete_code(self, prompt: str, workdir: str | Path) -> dict:
-        """Выполнить задачу в папке workdir. Возвращает text/tokens/cost_rub/raw."""
+    def _make_job_dir(self, workdir: str | Path | None) -> Path:
+        """Папка задачи: явно заданная или <jobs_root>/<uuid8> на каждый запуск."""
+        directory = (
+            Path(workdir)
+            if workdir is not None
+            else self.jobs_root / uuid.uuid4().hex[:8]
+        )
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ProviderUnavailable(
+                f"не удалось создать папку задачи {directory}: {exc}"
+            ) from exc
+        return directory
+
+    def complete_code(self, prompt: str, workdir: str | Path | None = None) -> dict:
+        """Выполнить задачу кодом. Возвращает text/tokens/cost_rub/raw (cost = 0)."""
         text = str(prompt).strip()
         if not text:
             raise ProviderError("opencode: пустой промпт")
 
-        binary = shutil.which(self.executable)
+        binary = _resolve_executable(self.executable)
         if binary is None:
             raise ProviderUnavailable(
-                f"{self.executable} не найден в PATH. Установи opencode (или добавь его "
-                "в PATH) — до этого задачи code будут уходить в облако по brain.escalation."
+                f"{self.executable} не найден в PATH. Установи opencode (или добавь "
+                "его в PATH) — до этого задачи code будут уходить в облако по "
+                "brain.escalation."
             )
 
-        directory = Path(workdir)
-        if not directory.exists():
-            raise ProviderError(f"opencode: рабочая папка не найдена: {directory}")
+        directory = self._make_job_dir(workdir)
+        # argv[0] остаётся "opencode" (как в документации CLI), а .cmd-обёртку
+        # Windows запускает через lpApplicationName — параметр executable.
+        command = [self.executable, "run", text]
+        run_kwargs: dict = {
+            "cwd": str(directory),
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": self.timeout,
+        }
+        if binary != self.executable:
+            run_kwargs["executable"] = binary
+        # env не передаём: процесс наследует окружение и берёт модель из
+        # ~/.config/opencode/opencode.json. Значения ключей не логируем.
 
-        command = [binary, "run", text]
-        logger.debug("opencode: запуск в {}", directory)
+        logger.debug(
+            "opencode: запуск в {} (timeout {:.0f} c)", directory, self.timeout
+        )
+        started = time.perf_counter()
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(directory),
-                capture_output=True,
-                timeout=self.timeout,
-                check=False,
-            )
+            completed = subprocess.run(command, **run_kwargs)
         except subprocess.TimeoutExpired as exc:
+            detail = _strip_ansi(_as_text(getattr(exc, "stderr", None))).strip()[:300]
+            suffix = f": {detail}" if detail else ""
             raise ProviderUnavailable(
-                f"opencode не ответил за {self.timeout:.0f} c"
+                f"opencode не ответил за {self.timeout:.0f} c{suffix}"
             ) from exc
         except OSError as exc:
             raise ProviderUnavailable(f"не удалось запустить opencode: {exc}") from exc
+        elapsed = time.perf_counter() - started
 
-        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
-        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = _as_text(completed.stdout)
+        stderr = _strip_ansi(_as_text(completed.stderr)).strip()
         if completed.returncode != 0:
-            raise ProviderError(
-                f"opencode завершился с кодом {completed.returncode}: "
-                f"{(stderr or stdout)[:300]}"
+            detail = (stderr or _strip_ansi(stdout).strip())[:300]
+            raise ProviderUnavailable(
+                f"opencode завершился с кодом {completed.returncode}: {detail}"
             )
-        if not stdout:
-            raise ProviderError("opencode ничего не вывел")
 
+        answer = clean_opencode_stdout(stdout)
+        if not answer.strip():
+            raise ProviderUnavailable(
+                f"opencode ничего не вывел (папка {directory}, stderr: {stderr[:300]})"
+            )
+
+        logger.info(
+            "opencode: ответ получен за {:.1f} c, символов {}, папка {}",
+            elapsed,
+            len(answer),
+            directory.name,
+        )
         return {
-            "text": stdout,
+            "text": answer,
             "tokens_in": 0,
             "tokens_out": 0,
             "cost_rub": 0.0,
-            "raw": {"returncode": completed.returncode, "stderr": stderr},
+            "raw": {
+                "returncode": completed.returncode,
+                "stderr": stderr[:300],
+                "workdir": str(directory),
+                "seconds": round(elapsed, 2),
+            },
         }
