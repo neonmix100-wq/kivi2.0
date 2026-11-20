@@ -1,0 +1,27 @@
+name: file_search
+version: "1.0.0"
+description: "Поиск файлов по имени в разрешённых папках проекта"
+category: files
+triggers:
+  - найди файл
+  - где лежит
+  - покажи файлы
+intents:
+  - найти файл по имени
+  - показать список файлов
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: ['D:\Kivi\data', 'D:\Kivi\skills']
+  tools: [fs_list]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

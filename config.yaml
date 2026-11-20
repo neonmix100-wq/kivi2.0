@@ -116,6 +116,10 @@ safety:
   git_checkpoint: true
 
 skills:
+  dir: "skills"
+  installed_dir: "skills/installed"
+  auto_disable_after_fails: 3
+  call_timeout_s: 30
   browser: {engine: chrome_extension, actions: read_and_act}
   vision: {mode: on_demand}
   music: {provider: yandex_desktop, control: smtc, search: unofficial_api}

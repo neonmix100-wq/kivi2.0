@@ -5,7 +5,9 @@
       имя + команда   -> THINKING (one-shot)
       только имя      -> сказать «Слушаю», открыть окно 8 с на команду без имени
       нет имени       -> IDLE, молча
-    THINKING -> Router.complete(task_type="chat") -> SPEAKING -> IDLE
+    THINKING -> planner.plan(command)
+      скилл найден    -> loader.invoke -> SPEAKING (Router не зовём)
+      скилла нет      -> Router.complete(task_type="chat") -> SPEAKING
 
 Никаких облачных вызовов для проверки имени: распознаёт локальный faster-whisper.
 Каждое распознанное высказывание пишется в data/logs/wake.log.
@@ -17,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from loguru import logger
 
@@ -31,6 +33,10 @@ from kivi.config import Settings, get_settings
 from kivi.stt.local import transcribe_wav
 from kivi.tts.stream import SentenceSpeaker
 from kivi.wake.detector import detect
+
+if TYPE_CHECKING:
+    from kivi.skills.planner import Planner
+    from kivi.skills.registry import SkillManifest, SkillRegistry
 
 __all__ = [
     "COOLDOWN_S",
@@ -163,6 +169,21 @@ class WakeLoop:
                 self.reflector = Reflector(router)
             except Exception as exc:  # noqa: BLE001 - память не должна блокировать запуск
                 logger.warning("Память: рефлексия недоступна: {}", exc)
+
+        # Скиллы: реестр + планировщик. Битые манифесты просто пропускаются,
+        # и команда уходит в Router как раньше.
+        self.skills: SkillRegistry | None = None
+        self.planner: Planner | None = None
+        try:
+            from kivi.skills.planner import Planner as _Planner
+            from kivi.skills.registry import SkillRegistry as _SkillRegistry
+
+            registry = _SkillRegistry.from_config(self.settings.section("skills"))
+            registry.scan()
+            self.skills = registry
+            self.planner = _Planner(registry)
+        except Exception as exc:  # noqa: BLE001 - скиллы не должны блокировать запуск
+            logger.warning("Скиллы: недоступны: {}: {}", type(exc).__name__, exc)
 
         logger.info(
             "WakeLoop готов: вход [{}] {}, окно {:.0f} c, cooldown {:.1f} c, память: {}",
@@ -351,6 +372,13 @@ class WakeLoop:
         """Стрим от LLM: предложения синтезируются и играются по мере поступления."""
         started = time.perf_counter()
         session = self._get_session()
+
+        # --- скиллы: если команда совпала с триггером — отвечаем без LLM ---
+        plan = self._plan_skill(command)
+        if plan is not None:
+            self._run_skill(command, plan["skill"], plan.get("args") or {})
+            return
+
         memory = self._memory_block(command)
         system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
         messages = (
@@ -410,6 +438,50 @@ class WakeLoop:
         self.vad.reset()
         self.state = "IDLE"
         wake_log.info("вернулся в IDLE")
+
+    # --- скиллы ---
+
+    def _plan_skill(self, command: str) -> dict | None:
+        """План скилла под команду. None — скилла нет, дальше Router (LLM)."""
+        if self.planner is None:
+            return None
+        plan = self.planner.plan(command)
+        if plan.get("skill") is None:
+            wake_log.info("скилл не найден -> LLM: {!r}", command)
+            return None
+        return plan
+
+    def _run_skill(self, command: str, manifest: SkillManifest, args: dict) -> None:
+        """Выполнить скилл: озвучить ответ и записать реплики. Router не зовём."""
+        from kivi.skills.loader import invoke
+
+        started = time.perf_counter()
+        self.state = "THINKING"
+        wake_log.info("THINKING -> скилл {}: {!r}", manifest.name, command)
+        try:
+            answer = invoke(manifest, args, registry=self.skills)
+        except Exception as exc:  # noqa: BLE001 - скилл не должен ронять цикл
+            wake_log.error(
+                "скилл {}: invoke упал: {}: {}", manifest.name, type(exc).__name__, exc
+            )
+            answer = f"Скилл «{manifest.name}» упал."
+
+        text = " ".join(str(answer).split())
+        if text:
+            self._say(text)
+            session = self._get_session()
+            session.add("user", command)
+            session.add("assistant", text)
+        else:
+            wake_log.warning("скилл {} вернул пустой ответ", manifest.name)
+
+        self._note_turn()
+        self._drain()
+        self.vad.reset()
+        self.state = "IDLE"
+        wake_log.info(
+            "скилл {}: {:.0f} мс", manifest.name, (time.perf_counter() - started) * 1000.0
+        )
 
     def _get_session(self) -> Session:
         """История диалога: создаётся лениво, чтобы smoke мог подставить свою БД."""

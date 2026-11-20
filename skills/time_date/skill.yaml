@@ -1,0 +1,28 @@
+name: time_date
+version: "1.0.0"
+description: "Текущее время и дата по Новосибирску"
+category: system
+triggers:
+  - который час
+  - какое число
+  - какая дата
+  - сколько времени
+intents:
+  - узнать текущее время
+  - узнать сегодняшнюю дату
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: []
+  tools: []
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""
