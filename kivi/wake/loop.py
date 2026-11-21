@@ -25,7 +25,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
@@ -224,7 +224,8 @@ class WakeLoop:
         )
 
         self.pre_roll_ms = float(audio.pre_roll_ms)
-        self.state: State = "IDLE"
+        self._state: State = "IDLE"
+        self.api: Any | None = None  # WS-сервер (kivi.api.server.ApiServer)
         self.window_until = 0.0
         self.last_wake_ts = 0.0
         self._speaking = False  # True пока Киви озвучивает ответ (защита от самослушания)
@@ -293,7 +294,51 @@ class WakeLoop:
             self.vad.release()  # освобождаем nanobind-объект soxr
         except Exception as exc:  # noqa: BLE001 - не должно мешать остановке
             wake_log.debug("не удалось освободить soxr-ресемплер: {}", exc)
-        self._reflect_on_stop()  # память: доделываем проход при корректной остановке
+        # Рефлексию при выходе ждёт main (wait_reflection) ДО остановки потоков.
+
+    @property
+    def state(self) -> State:
+        """Текущее состояние; смена шлёт status в WS-API (если подключён)."""
+        return self._state
+
+    @state.setter
+    def state(self, value: State) -> None:
+        changed = getattr(self, "_state", None) != value
+        self._state = value
+        if changed:
+            self._emit_status()
+
+    def status_snapshot(self) -> dict[str, object]:
+        """Состояние для WS-событий status."""
+        budget = 0.0
+        try:
+            if self.router is not None and hasattr(self.router, "budget"):
+                budget = float(self.router.budget.month_spent_rub())
+        except Exception:  # noqa: BLE001 - статус не должен падать
+            budget = 0.0
+        try:
+            from kivi.prefs import get_tts_volume
+
+            volume = float(get_tts_volume())
+        except Exception:  # noqa: BLE001
+            volume = 0.8
+        return {
+            "state": self._state,
+            "budget_used": budget,
+            "volume": volume,
+            "window_open": bool(
+                self.window_until and time.monotonic() <= self.window_until
+            ),
+        }
+
+    def _emit_status(self) -> None:
+        api = getattr(self, "api", None)
+        if api is None:
+            return
+        try:
+            api.broadcast_status(**self.status_snapshot())
+        except Exception as exc:  # noqa: BLE001 - API не должен ронять цикл
+            wake_log.debug("api: status не отправлен: {}", exc)
 
     def run(
         self,
@@ -377,6 +422,7 @@ class WakeLoop:
         if self.window_until and time.monotonic() > self.window_until:
             self.window_until = 0.0
             wake_log.info("диалог: окно закрыто по тишине")
+            self._emit_status()
 
     def _open_window(self) -> None:
         """Открыть окно диалога: тишина пользователя после ответа Киви."""
@@ -384,12 +430,14 @@ class WakeLoop:
             return
         self.window_until = time.monotonic() + self.silence_s
         wake_log.info("диалог: окно открыто ({:.0f}с тишины)", self.silence_s)
+        self._emit_status()
 
     def _close_window(self, reason: str = "") -> None:
         if not self.window_until:
             return
         self.window_until = 0.0
         wake_log.info("диалог: окно закрыто{}", f" {reason}" if reason else "")
+        self._emit_status()
 
     def _is_greeting(self, text: str) -> bool:
         return _contains_phrase(text, self.greeting_phrases, prefix=True)
@@ -852,7 +900,11 @@ class WakeLoop:
         self._reflect_thread.start()
 
     def _reflect_job(self, messages: list[dict], turns: int) -> None:
-        stats = self.reflector.run(messages)
+        try:
+            stats = self.reflector.run(messages)
+        except Exception as exc:  # noqa: BLE001 - рефлексия не должна ронять поток
+            wake_log.warning("память: рефлексия упала: {}", exc)
+            return
         if stats.get("skipped"):
             wake_log.info("память: рефлексия пропущена ({})", stats["skipped"])
             return
@@ -865,27 +917,38 @@ class WakeLoop:
             stats["cost_rub"],
         )
 
-    def _reflect_on_stop(self) -> None:
-        """Проход рефлексии при корректной остановке (не чаще 5 минут)."""
+    def wait_reflection(self, timeout: float = 8.0) -> bool:
+        """Дождаться финальной рефлексии перед остановкой (не дольше timeout).
+
+        True — завершилась (или нечего делать), False — прервана по таймауту.
+        """
         if self.reflector is None:
-            return
-        with self._memory_lock:
-            turns = self._turns_since_reflect
-        if turns <= 0:
-            return
-        try:
-            stats = self.reflector.run(self._get_session().history(max_tokens=3000))
-        except Exception as exc:  # noqa: BLE001
-            wake_log.warning("память: рефлексия при остановке упала: {}", exc)
-            return
-        if stats.get("skipped"):
-            wake_log.info("память: при остановке пропуск ({})", stats["skipped"])
-        else:
-            wake_log.info(
-                "память: при остановке фактов {}, стоимость {:.5f} руб",
-                stats["facts"],
-                stats["cost_rub"],
+            return True
+
+        thread = self._reflect_thread
+        if thread is None or not thread.is_alive():
+            with self._memory_lock:
+                turns = self._turns_since_reflect
+            if turns <= 0:
+                wake_log.info("reflection завершён")
+                return True
+            messages = self._get_session().history(max_tokens=3000)
+            thread = threading.Thread(
+                target=self._reflect_job,
+                args=(messages, turns),
+                name="kivi-reflect-stop",
+                daemon=True,
             )
+            with self._memory_lock:
+                self._reflect_thread = thread
+            thread.start()
+
+        thread.join(max(0.1, float(timeout)))
+        if thread.is_alive():
+            wake_log.warning("reflection прерван по таймауту")
+            return False
+        wake_log.info("reflection завершён")
+        return True
 
     def _say(self, text: str) -> None:
         phrase = " ".join(str(text).split())

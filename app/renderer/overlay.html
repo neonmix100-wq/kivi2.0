@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src ws://127.0.0.1:8765; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
+  <title>Kivi overlay</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="overlay-body">
+  <div class="overlay-root" id="overlay-root">
+    <div class="overlay-pill" id="pill">
+      <span class="pill-dot" id="pill-dot"></span>
+      <span class="pill-text" id="pill-text">IDLE</span>
+      <span class="pill-conn" id="pill-conn">подключение</span>
+    </div>
+
+    <div class="overlay-card" id="ask-card" hidden>
+      <div class="card-kicker">Киви спрашивает</div>
+      <div class="card-question" id="ask-question"></div>
+      <div class="card-options" id="ask-options"></div>
+      <div class="card-input-row">
+        <input id="ask-input" type="text" placeholder="Свой ответ…" autocomplete="off">
+        <button class="card-btn primary" id="ask-send">Ответить</button>
+      </div>
+      <button class="card-skip" id="ask-skip">Пропустить</button>
+    </div>
+
+    <div class="overlay-card" id="confirm-card" hidden>
+      <div class="card-kicker">Нужно подтверждение</div>
+      <div class="card-question" id="confirm-title"></div>
+      <div class="card-body" id="confirm-body"></div>
+      <pre class="card-details" id="confirm-details"></pre>
+      <div class="card-actions">
+        <button class="card-btn danger" id="confirm-cancel">Отмена</button>
+        <button class="card-btn primary" id="confirm-ok">Подтвердить</button>
+      </div>
+    </div>
+
+    <div class="overlay-toast" id="overlay-toast" hidden></div>
+  </div>
+  <script src="overlay.js"></script>
+</body>
+</html>

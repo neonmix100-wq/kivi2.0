@@ -39,7 +39,9 @@ __all__ = [
 LOCK_PORT = 47613
 LOCK_HOST = "127.0.0.1"
 THREAD_JOIN_TIMEOUT = 2.0
-FORCE_EXIT_DELAY = 3.0
+SIGNAL_GRACE_S = 8.0
+FORCE_EXIT_EXTRA_S = 2.0
+FORCE_EXIT_DELAY = SIGNAL_GRACE_S + FORCE_EXIT_EXTRA_S  # 10 c: reflect 8 + потоки 2
 
 _lock_socket: socket.socket | None = None
 _cleanup_callbacks: list[Callable[[], object]] = []
@@ -155,14 +157,27 @@ def shutdown(reason: str = "") -> bool:
     return bool(stuck)
 
 
-def install_signal_handlers(stop_event: threading.Event) -> None:
-    """SIGINT/SIGTERM -> мягкая остановка, через 3 c — принудительный выход."""
+def force_exit_delay(grace_s: float = SIGNAL_GRACE_S) -> float:
+    """Сколько ждать мягкой остановки: grace (reflect) + 2 с на потоки."""
+    return max(0.0, float(grace_s)) + FORCE_EXIT_EXTRA_S
+
+
+def install_signal_handlers(
+    stop_event: threading.Event, *, grace_s: float = SIGNAL_GRACE_S
+) -> None:
+    """SIGINT/SIGTERM -> мягкая остановка, через grace+2 c — принудительный выход.
+
+    Рефлексию памяти main дожидается сам (loop.wait_reflection) ДО остановки
+    потоков; здесь только страховка от зависания.
+    """
     global _signal_stop_event
     _signal_stop_event = stop_event
 
+    delay = force_exit_delay(grace_s)
+
     def _force_exit() -> None:
         logger.warning(
-            "остановка не завершилась за {:.0f} c — os._exit(0)", FORCE_EXIT_DELAY
+            "остановка не завершилась за {:.0f} c — os._exit(0)", delay
         )
         try:
             logger.complete()
@@ -173,7 +188,7 @@ def install_signal_handlers(stop_event: threading.Event) -> None:
     def _handler(signum, frame):  # noqa: ANN001
         logger.info("получен сигнал {} — останавливаюсь", signum)
         stop_event.set()
-        timer = threading.Timer(FORCE_EXIT_DELAY, _force_exit)
+        timer = threading.Timer(delay, _force_exit)
         timer.daemon = True
         timer.start()
 

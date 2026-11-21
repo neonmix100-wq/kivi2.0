@@ -1,0 +1,13 @@
+{
+  "name": "kivi-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kivi desktop shell (Electron, vanilla HTML/CSS/JS)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^45.4.1"
+  }
+}

@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 from kivi.config import DATA_DIR, get_settings
 from kivi.log import logger
+from kivi.prefs import get_tts_volume
 
 __all__ = [
     "DEFAULT_TIMEOUT",
@@ -179,6 +180,9 @@ def play_file(
     args = [ffplay, "-nodisp", "-autoexit", "-loglevel", "error"]
     if samplerate is not None:
         args += ["-f", "s16le", "-ar", str(int(samplerate))]
+    else:
+        # mp3/wav из кэша: ffplay умеет свою громкость (PCM масштабируется выше).
+        args += ["-volume", str(int(round(tts_volume() * 100)))]
     args.append(str(path))
 
     wait_for = None
@@ -343,6 +347,31 @@ def mp3_to_pcm(mp3_path: Path, *, samplerate: int, pcm_path: Path | None = None)
     return target
 
 
+def tts_volume() -> float:
+    """Текущий множитель громкости голоса Киви (0..1) из prefs.json."""
+    return get_tts_volume()
+
+
+def apply_gain(audio: np.ndarray, volume: float | None = None) -> np.ndarray:
+    """Умножить int16-PCM на громкость (0..1) с ограничением по амплитуде."""
+    gain = get_tts_volume() if volume is None else max(0.0, min(1.0, float(volume)))
+    if abs(gain - 1.0) < 1e-3:
+        return audio
+    scaled = np.clip(audio.astype(np.float32) * gain, -32768, 32767)
+    return scaled.astype(np.int16)
+
+
+def apply_pcm_volume(pcm_path: Path, volume: float | None = None) -> float:
+    """Применить громкость к s16le-файлу ПЕРЕД play_file. Возвращает множитель."""
+    gain = get_tts_volume() if volume is None else max(0.0, min(1.0, float(volume)))
+    if abs(gain - 1.0) < 1e-3:
+        return gain
+    data = np.fromfile(pcm_path, dtype=np.int16)
+    apply_gain(data, gain).tofile(pcm_path)
+    logger.debug("TTS: громкость {:.2f} применена к {}", gain, Path(pcm_path).name)
+    return gain
+
+
 def play_pcm(
     pcm_path: Path,
     *,
@@ -354,9 +383,10 @@ def play_pcm(
     if not pcm_path.exists() or pcm_path.stat().st_size == 0:
         raise SpeakError(f"Пустой pcm: {pcm_path}")
     expected = pcm_path.stat().st_size / (2 * samplerate)
+    volume = apply_pcm_volume(pcm_path)
     played = play_file(pcm_path, samplerate=samplerate, run_id=run_id)
     logger.debug("TTS: pcm отыгран за {:.2f} c (ожидалось {:.2f} c)", played, expected)
-    return played, 0.90
+    return played, 0.90 * volume
 
 
 

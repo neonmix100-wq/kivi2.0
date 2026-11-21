@@ -98,6 +98,12 @@ search:
   fact_keywords: ["кто", "что", "когда", "где", "сколько", "почему",
                   "как", "выиграл", "произошло", "стоит", "находится"]
 
+api:
+  host: "127.0.0.1"        # строго loopback
+  port: 8765
+  ask_timeout_s: 60
+  confirm_timeout_s: 120
+
 conversation:
   enabled: true
   silence_s: 8              # окно = тишина пользователя после её ответа

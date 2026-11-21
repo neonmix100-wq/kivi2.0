@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src ws://127.0.0.1:8765; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
+  <title>Kivi</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="brand">
+        <span class="logo-dot"></span>
+        <span class="brand-name">Kivi</span>
+      </div>
+      <div class="titlebar-address">ядро: 127.0.0.1:8765</div>
+      <div class="titlebar-spacer"></div>
+      <div class="conn-pill" id="conn-pill">
+        <span class="conn-dot"></span>
+        <span id="conn-text">подключение…</span>
+      </div>
+      <div class="window-controls">
+        <button class="win-btn" id="btn-min" title="Свернуть">–</button>
+        <button class="win-btn" id="btn-max" title="Развернуть">□</button>
+        <button class="win-btn win-btn-close" id="btn-close" title="Закрыть">✕</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="agent-card">
+          <div class="agent-avatar">K</div>
+          <div class="agent-meta">
+            <div class="agent-name">Kivi</div>
+            <div class="agent-state" id="agent-state">IDLE</div>
+          </div>
+          <span class="agent-pulse" id="agent-pulse"></span>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-page="overview">Обзор</button>
+          <button class="nav-item" data-page="logs">Логи</button>
+          <button class="nav-item" data-page="settings">Настройки</button>
+          <div class="nav-label">скоро</div>
+          <button class="nav-item muted" data-page="skills">Скиллы</button>
+          <button class="nav-item muted" data-page="memory">Память</button>
+          <button class="nav-item muted" data-page="gaps">Пробелы</button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div>Kivi Desktop 0.1</div>
+          <div class="muted">Electron · без сборщика</div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section class="page active" id="page-overview">
+          <div class="page-head">
+            <div>
+              <h1>Обзор</h1>
+              <p>Состояние ядра, бюджет и громкость голоса.</p>
+            </div>
+            <span class="badge" id="window-badge">окно: закрыто</span>
+          </div>
+
+          <div class="cards">
+            <article class="stat-card">
+              <span class="stat-label">Состояние</span>
+              <strong class="stat-value" id="stat-state">—</strong>
+              <small class="muted" id="stat-state-hint">ждём событие status</small>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Бюджет за месяц</span>
+              <strong class="stat-value"><span id="stat-budget">—</span> ₽</strong>
+              <small class="muted">usage из data/kivi.db</small>
+            </article>
+            <article class="stat-card stat-card-wide">
+              <span class="stat-label">Своя громкость</span>
+              <div class="volume-row">
+                <input id="volume-slider" type="range" min="0" max="100" step="1" value="80">
+                <span class="volume-value" id="volume-value">80%</span>
+              </div>
+              <small class="muted">применяется к PCM до проигрывания</small>
+            </article>
+          </div>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Последнее событие</h2>
+              <span class="muted" id="last-event-time">—</span>
+            </div>
+            <div class="last-event" id="last-event">Пока тихо.</div>
+          </article>
+        </section>
+
+        <section class="page" id="page-logs">
+          <div class="page-head">
+            <div>
+              <h1>Логи</h1>
+              <p>INFO и выше: хвост из ядра + поток новых строк.</p>
+            </div>
+            <button class="ghost-btn" id="btn-refresh-logs">Обновить</button>
+          </div>
+          <pre class="log-view" id="log-view"></pre>
+        </section>
+
+        <section class="page" id="page-settings">
+          <div class="page-head">
+            <div>
+              <h1>Настройки</h1>
+              <p>Тема и шрифт интерфейса. Хранится в localStorage.</p>
+            </div>
+          </div>
+
+          <article class="panel">
+            <h2>Тема</h2>
+            <div class="theme-grid" id="theme-grid">
+              <button class="theme-tile" data-theme="dark">
+                <span class="theme-preview preview-dark"></span><span>Тёмная</span>
+              </button>
+              <button class="theme-tile" data-theme="light">
+                <span class="theme-preview preview-light"></span><span>Светлая</span>
+              </button>
+              <button class="theme-tile" data-theme="green">
+                <span class="theme-preview preview-green"></span><span>Зелёная</span>
+              </button>
+              <button class="theme-tile" data-theme="blue">
+                <span class="theme-preview preview-blue"></span><span>Голубая</span>
+              </button>
+              <button class="theme-tile" data-theme="red">
+                <span class="theme-preview preview-red"></span><span>Красная</span>
+              </button>
+              <label class="theme-tile theme-tile-custom" data-theme="custom">
+                <span class="theme-preview preview-custom" id="custom-preview"></span>
+                <span>Своя</span>
+                <input type="color" id="custom-accent" value="#f0703c" title="Выбрать акцент">
+              </label>
+            </div>
+          </article>
+
+          <article class="panel">
+            <h2>Шрифт</h2>
+            <div class="font-grid" id="font-grid">
+              <button class="font-tile" data-font="system"><span class="font-preview font-system">Kivi</span><span>Системный</span></button>
+              <button class="font-tile" data-font="tahoma"><span class="font-preview font-tahoma">Kivi</span><span>Tahoma</span></button>
+              <button class="font-tile" data-font="verdana"><span class="font-preview font-verdana">Kivi</span><span>Verdana</span></button>
+              <button class="font-tile" data-font="georgia"><span class="font-preview font-georgia">Kivi</span><span>Georgia</span></button>
+            </div>
+          </article>
+        </section>
+
+        <section class="page" id="page-skills">
+          <div class="page-head"><div><h1>Скиллы</h1><p>Установка и вызов умений.</p></div></div>
+          <article class="panel placeholder">
+            <strong>Каркас страницы</strong>
+            <p>Каталог умений, установка с GitHub и запуск появятся следующим шагом.</p>
+          </article>
+        </section>
+
+        <section class="page" id="page-memory">
+          <div class="page-head"><div><h1>Память</h1><p>Факты, журнал и темы vault.</p></div></div>
+          <article class="panel placeholder">
+            <strong>Каркас страницы</strong>
+            <p>Просмотр memory/ через API get_memory появится следующим шагом.</p>
+          </article>
+        </section>
+
+        <section class="page" id="page-gaps">
+          <div class="page-head"><div><h1>Пробелы</h1><p>Частые просьбы без умения.</p></div></div>
+          <article class="panel placeholder">
+            <strong>Каркас страницы</strong>
+            <p>Таблица capability_gaps через API get_gaps появится следующим шагом.</p>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

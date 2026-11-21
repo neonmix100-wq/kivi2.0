@@ -13,6 +13,7 @@ Windows user minea. Микрофон fifine SC3; выход наушники Tem
 ffmpeg/ffplay 9.0.2. OpenCode CLI 1.19.6 (V1), конфиг
 C:\Users\minea\.config\opencode\opencode.json (model opencode/deepseek-v4.1-flash-free),
 ключ в системном env OPENCODE_API_KEY (setx). Владелец путает CMD и PowerShell.
+Node 24 / npm 11; Electron 45 установлен локально в app/ (node_modules в gitignore).
 
 ## Провайдеры
 Polza https://polza.ai/api/v1, ключ .env LLM_API_KEY.
@@ -53,7 +54,8 @@ kivi/audio/{capture,vad,recorder}; kivi/stt/{local,transcribe};
 kivi/tts/{speak,cache,stream,fillers}; kivi/brain/{router,providers,budget,
 session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
 kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search};
-kivi/wake/{detector,loop}; kivi/runtime; kivi/main.
+kivi/wake/{detector,loop}; kivi/runtime; kivi/main;
+kivi/api/{server,pending,client}; kivi/ui/overlay; app/ (Electron, vanilla).
 Скиллы: skills/{time_date,file_search}; skills/installed/ (gitignore).
 Данные: data/kivi.db (usage, capability_gaps, messages), data/skills.db,
 data/models, data/tts_cache, data/opencode_jobs, memory/ (Obsidian-vault),
@@ -61,17 +63,22 @@ data/logs/kivi.log.
 
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
-opencode,flow,dialogue,search_context,tts_stream,memory}; level_meter; cuda_check.
+opencode,flow,dialogue,search_context,tts_stream,memory,api,volume_exit};
+level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
-## Текущий шаг (не закрыт)
-Промпт контекстного поиска/конца диалога/неблокирующего прогрева выполнен.
-smoke_search_context = PASS. Ожидается: вывод обновлённого smoke_dialogue.py
-и голосовой лог (привет; курс биткоина одним ответом; «я имел в виду биткоин»
-по контексту; «спасибо» не закрывает; «конец диалога» закрывает; тишина 8с
-закрывает). После зелёного — коммит.
+## Текущий шаг (сдан, ждёт голосовой приёмки)
+Electron-каркас в app/: главное окно 1160x760 (кастомный тайтлбар, сайдбар,
+темы/шрифты, логи, громкость), оверлей-пилюля снизу справа с карточками
+ask/confirm и тостом info. Ядро запускается дочерним процессом только если
+порт 8765 свободен; при закрытии главного окна приложение останавливает
+своё ядро, но не трогает ядро, запущенное вручную. Python-путь: kivi/api/*,
+kivi/ui/overlay.py, tests/api_ask_demo.py.
+Проверка: cd app; npm start -> окна; затем python tests\api_ask_demo.py ->
+карточка в оверлее, ответ кликом в консоли.
 
 ## Roadmap
-Вариант А (выбран): 1) оверлей-виджет (вопросы, ревью кода, подтверждения),
+Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить
+страницы Скиллы/Память/Пробелы и подключить реальные сценарии,
 2) зрение (скриншоты, vision-тир).
 Позже: установка скиллов с GitHub и генерация скиллов через OpenCode
 (требуют оверлей), barge-in, хоткеи.

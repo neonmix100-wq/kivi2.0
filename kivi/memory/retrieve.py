@@ -26,8 +26,8 @@ from kivi.memory.vault import iter_facts
 __all__ = ["INDEX_DB", "MemoryRetriever", "cosine"]
 
 INDEX_DB = DATA_DIR / "memory_index.db"
-DEFAULT_MODEL = "bge-multilingual-gemma2"
-FALLBACK_MODELS = ("baai/bge-m3", "openai/text-embedding-3-small")
+DEFAULT_MODEL = "baai/bge-m3"
+FALLBACK_MODELS = ("openai/text-embedding-3-small",)
 EMBED_TIMEOUT = 30.0
 STOPWORDS = {
     "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то",
@@ -68,6 +68,18 @@ def _hash(text: str) -> str:
     return hashlib.sha256(" ".join(str(text).lower().split()).encode("utf-8")).hexdigest()
 
 
+def _memory_embed_model() -> str:
+    """Модель эмбеддингов из config.yaml (memory.embed_model)."""
+    try:
+        from kivi.config import load_config
+
+        memory = load_config().model_dump().get("memory") or {}
+        return " ".join(str(memory.get("embed_model") or "").split())
+    except Exception as exc:  # noqa: BLE001 - конфиг не должен ронять память
+        logger.debug("Память: memory.embed_model не прочитан: {}", exc)
+        return ""
+
+
 class MemoryRetriever:
     """Поиск релевантных фактов с кэшем векторов и офлайн-фолбэком."""
 
@@ -85,7 +97,7 @@ class MemoryRetriever:
         load_dotenv()
         self.base = (os.getenv("LLM_BASE_URL") or "").strip().rstrip("/")
         self.key = (os.getenv("LLM_API_KEY") or "").strip()
-        cfg_model = " ".join(str(model or DEFAULT_MODEL).split())
+        cfg_model = " ".join(str(model or _memory_embed_model() or DEFAULT_MODEL).split())
         self.models = [cfg_model] + [m for m in FALLBACK_MODELS if m != cfg_model]
         self.last_path = "none"
         self._ensure_schema()

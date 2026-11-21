@@ -246,6 +246,22 @@ class SkillContext:
                 files.append(str(candidate))
         return sorted(files)
 
+    # --- своя громкость ---
+
+    def get_self_volume(self) -> float:
+        """Текущая громкость голоса Киви (0..1). Нужен tool self_volume."""
+        self._require_tool("self_volume")
+        from kivi.prefs import get_tts_volume
+
+        return get_tts_volume()
+
+    def set_self_volume(self, value: float) -> float:
+        """Изменить громкость голоса Киви (0..1). Нужен tool self_volume."""
+        self._require_tool("self_volume")
+        from kivi.prefs import set_tts_volume
+
+        return set_tts_volume(value)
+
     # --- безобидные методы: доступны всегда ---
 
     def notify(self, text: str) -> None:

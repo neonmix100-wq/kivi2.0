@@ -33,7 +33,14 @@ from kivi.brain.persona import to_speech
 from kivi.config import get_settings
 from kivi.log import logger
 from kivi.tts import fillers
-from kivi.tts.speak import TMP_DIR, _move_to_slot, _tts_settings, mp3_to_pcm, synthesize_mp3
+from kivi.tts.speak import (
+    TMP_DIR,
+    _move_to_slot,
+    _tts_settings,
+    apply_gain,
+    mp3_to_pcm,
+    synthesize_mp3,
+)
 
 __all__ = [
     "ACK_DELAY_S",
@@ -235,6 +242,7 @@ class SentenceSpeaker:
                         pcm_path=TMP_DIR / f"tts_{self.run_id}{index:02d}.pcm",
                     )
                     pcm = np.frombuffer(pcm_path.read_bytes(), dtype=np.int16).copy()
+                    pcm = apply_gain(pcm)
                     _move_to_slot(pcm_path, TMP_DIR / "tts_last.pcm")
                     if mp3.parent == TMP_DIR:  # файл из кэша трогать нельзя
                         _move_to_slot(mp3, TMP_DIR / "tts_last.mp3")
@@ -269,6 +277,7 @@ class SentenceSpeaker:
                 pcm_path=TMP_DIR / f"tts_{self.run_id}00.pcm",
             )
             pcm = np.frombuffer(pcm_path.read_bytes(), dtype=np.int16).copy()
+            pcm = apply_gain(pcm)
             _move_to_slot(pcm_path, TMP_DIR / "tts_last.pcm")
             return pcm
         except Exception as exc:  # noqa: BLE001 - без вводной можно жить

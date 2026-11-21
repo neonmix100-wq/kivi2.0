@@ -10,6 +10,7 @@ python-процесс не остаётся.
 
 from __future__ import annotations
 
+import argparse
 import os
 import threading
 
@@ -27,9 +28,38 @@ from kivi.stt.local import warmup as warmup_stt
 from kivi.tts.speak import warm_connection as warmup_tts
 from kivi.wake.loop import WakeLoop
 
-__all__ = ["main"]
+__all__ = ["create_api_server", "main", "parse_args"]
 
 REPORT_INTERVAL_S = 300.0  # раз в 5 минут пишем состояние и бюджет
+REFLECTION_GRACE_S = 8.0  # при выходе ждём финальную рефлексию не дольше 8 с
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Аргументы запуска: --no-api для headless-режима."""
+    parser = argparse.ArgumentParser(description="Kivi — голосовой ассистент")
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="не поднимать WebSocket API (headless-тесты)",
+    )
+    return parser.parse_args(argv)
+
+
+def create_api_server(stop_event: threading.Event, *, no_api: bool = False):
+    """Поднять WS-сервер (None при --no-api или ошибке)."""
+    if no_api:
+        logger.info("api: отключён (--no-api)")
+        return None
+    try:
+        from kivi.api.server import ApiServer
+
+        server = ApiServer()
+        server.set_shutdown_callback(stop_event.set)
+        server.start()
+        return server
+    except Exception as exc:  # noqa: BLE001 - API не должен мешать голосу
+        logger.warning("api: не удалось поднять сервер: {}: {}", type(exc).__name__, exc)
+        return None
 
 
 def _warm_fillers() -> None:
@@ -55,7 +85,7 @@ def _reporter(loop: WakeLoop, router: Router, stop: threading.Event) -> None:
         )
 
 
-def _run() -> int:
+def _run(*, enable_api: bool = True) -> int:
     try:
         settings = get_settings()
     except (ConfigError, DeviceNotFoundError) as exc:
@@ -83,6 +113,12 @@ def _run() -> int:
     register_cleanup(loop.stop)  # WakeLoop + AudioCapture
     register_cleanup(stop.set)  # сначала просим цикл выйти
 
+    api_server = create_api_server(stop, no_api=not enable_api)
+    if api_server is not None:
+        loop.api = api_server
+        api_server.attach(loop)
+        logger.info("api: сервер привязан к ядру (порт {})", api_server.port)
+
     devices = settings.devices
     print(f"Вход:  [{devices.input_index}] {devices.input_name}")
     print(f"Выход: [{devices.output_index}] {devices.output_name}")
@@ -107,6 +143,15 @@ def _run() -> int:
     except KeyboardInterrupt:
         logger.info("остановка по Ctrl+C")
     finally:
+        try:
+            loop.wait_reflection(REFLECTION_GRACE_S)
+        except Exception as exc:  # noqa: BLE001 - выход не должен падать
+            logger.warning("reflection: ожидание упало: {}: {}", type(exc).__name__, exc)
+        if api_server is not None:
+            try:
+                api_server.stop()
+            except Exception as exc:  # noqa: BLE001 - API не должен мешать выходу
+                logger.warning("api: остановка упала: {}: {}", type(exc).__name__, exc)
         forced = shutdown("выход из main")
         logger.info("Kivi остановлена. Бюджет: {}", router.budget.describe())
         try:
@@ -119,13 +164,14 @@ def _run() -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     setup_logging()
+    args = parse_args(argv)
     print("=== Kivi: постоянная прослушка (python -m kivi.main) ===")
     print("Скажи: «Киви» или «Киви, <команда>». Ctrl+C — выход.")
     try:
         with single_instance():
-            return _run()
+            return _run(enable_api=not args.no_api)
     except SystemExit:
         raise
 

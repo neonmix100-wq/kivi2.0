@@ -1,0 +1,441 @@
+"""WebSocket API ядра Киви на 127.0.0.1:8765 (threaded, daemon).
+
+События (core -> clients):
+    status{state,budget_used,volume,window_open}
+    ask{id,question,options}, confirm{id,title,body,details}
+    info{text}, log{line} (хвост лога, уровень>=INFO, кольцо 200 строк)
+
+Команды (clients -> core):
+    ask{question,options}, confirm{title,body,details}, info{text},
+    ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
+    get_status, get_gaps{limit}, get_memory{kind}, tail_logs{n}, shutdown
+Ответ на команду: {ok, ...}.
+
+Слушаем СТРОГО 127.0.0.1. Аутентификации нет: доступен только loopback.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import yaml
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from kivi.api.pending import PendingRegistry
+from kivi.config import CONFIG_PATH
+from kivi.prefs import get_tts_volume, set_tts_volume
+
+try:  # websockets >= 13
+    from websockets.asyncio.server import serve
+except ImportError:  # pragma: no cover - старые версии
+    from websockets.server import serve  # type: ignore[no-redef]
+
+from websockets.exceptions import ConnectionClosed
+
+__all__ = [
+    "ApiConfig",
+    "ApiServer",
+    "LOG_RING_SIZE",
+    "load_api_config",
+]
+
+LOOPBACK_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+DEFAULT_ASK_TIMEOUT_S = 60.0
+DEFAULT_CONFIRM_TIMEOUT_S = 120.0
+LOG_RING_SIZE = 200
+
+
+class ApiConfig(BaseModel):
+    """Секция api из config.yaml."""
+
+    model_config = ConfigDict(extra="allow")
+
+    host: str = LOOPBACK_HOST
+    port: int = Field(default=DEFAULT_PORT, ge=0, le=65535)
+    ask_timeout_s: float = Field(default=DEFAULT_ASK_TIMEOUT_S, gt=0)
+    confirm_timeout_s: float = Field(default=DEFAULT_CONFIRM_TIMEOUT_S, gt=0)
+
+
+def load_api_config(path: Path | None = None) -> dict[str, Any]:
+    """Секция api из config.yaml (битый конфиг — пусто + WARNING)."""
+    config_path = Path(path) if path is not None else CONFIG_PATH
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning("api: не читается {}: {}", config_path.name, exc)
+        return {}
+    section = raw.get("api") if isinstance(raw, dict) else None
+    return dict(section) if isinstance(section, dict) else {}
+
+
+class ApiServer:
+    """WS-сервер в отдельном потоке; broadcast можно звать из любого потока."""
+
+    def __init__(
+        self,
+        *,
+        host: str | None = None,
+        port: int | None = None,
+        config: dict[str, Any] | ApiConfig | None = None,
+        core: Any | None = None,
+    ) -> None:
+        if isinstance(config, ApiConfig):
+            parsed = config
+        else:
+            raw = dict(config) if config is not None else load_api_config()
+            try:
+                parsed = ApiConfig.model_validate(raw)
+            except ValidationError as exc:
+                logger.warning("api: конфиг невалиден ({}), беру умолчания", exc)
+                parsed = ApiConfig()
+
+        requested_host = str(host or parsed.host or LOOPBACK_HOST)
+        if requested_host != LOOPBACK_HOST:
+            logger.warning(
+                "api: host={!r} запрещён — слушаю только {}", requested_host, LOOPBACK_HOST
+            )
+        self.host = LOOPBACK_HOST
+        self.port = int(port if port is not None else parsed.port)
+        self._core = core
+        self._clients: set[Any] = set()
+        self._clients_lock = threading.Lock()
+        self._ring: deque[str] = deque(maxlen=LOG_RING_SIZE)
+        self._ring_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._server: Any | None = None
+        self._stopped: asyncio.Event | None = None
+        self._ready = threading.Event()
+        self._log_sink: int | None = None
+        self._shutdown_callback: Callable[[], object] | None = None
+        self.pending = PendingRegistry(
+            connected=lambda: self.has_clients,
+            send=self.broadcast,
+            ask_timeout_s=parsed.ask_timeout_s,
+            confirm_timeout_s=parsed.confirm_timeout_s,
+        )
+
+    # --- жизненный цикл ---
+
+    def attach(self, core: Any) -> None:
+        """Привязать ядро (WakeLoop): из него берём status."""
+        self._core = core
+
+    def set_shutdown_callback(self, callback: Callable[[], object]) -> None:
+        """Что вызвать по команде shutdown (например, stop_event.set)."""
+        self._shutdown_callback = callback
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def has_clients(self) -> bool:
+        with self._clients_lock:
+            return bool(self._clients)
+
+    def _install_log_sink(self) -> None:
+        if self._log_sink is not None:
+            return
+        self._log_sink = logger.add(
+            self._on_log,
+            level="INFO",
+            format="{time:HH:mm:ss} | {level: <7} | {message}",
+            enqueue=False,
+            catch=True,
+        )
+
+    def _remove_log_sink(self) -> None:
+        if self._log_sink is None:
+            return
+        try:
+            logger.remove(self._log_sink)
+        except ValueError:
+            pass
+        self._log_sink = None
+
+    def _on_log(self, message: Any) -> None:
+        line = str(message).rstrip()
+        if not line:
+            return
+        with self._ring_lock:
+            self._ring.append(line)
+        self.broadcast({"event": "log", "line": line})
+
+    def start(self, *, timeout: float = 5.0) -> "ApiServer":
+        """Поднять сервер и дождаться готовности (не дольше timeout)."""
+        if self.is_running:
+            return self
+        self._install_log_sink()
+        self._ready.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="kivi-api", daemon=True
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout):
+            self._remove_log_sink()
+            raise RuntimeError(f"api: сервер не поднялся за {timeout:.0f} с")
+        return self
+
+    def _run(self) -> None:
+        try:
+            asyncio.run(self._serve())
+        except Exception as exc:  # noqa: BLE001 - сервер не должен ронять ядро
+            logger.error("api: сервер упал: {}: {}", type(exc).__name__, exc)
+        finally:
+            self._ready.set()
+
+    async def _serve(self) -> None:
+        async with serve(
+            self._handler,
+            self.host,
+            self.port,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as server:
+            self._server = server
+            self._async_loop = asyncio.get_running_loop()
+            self._stopped = asyncio.Event()
+            socket = None
+            sockets = getattr(server, "sockets", None)
+            if sockets:
+                socket = sockets[0]
+            if socket is not None:
+                self.port = int(socket.getsockname()[1])
+            logger.info("api: слушаю ws://{}:{}", self.host, self.port)
+            self._ready.set()
+            await self._stopped.wait()
+
+    async def _shutdown(self) -> None:
+        for websocket in list(self._clients):
+            try:
+                await websocket.close()
+            except Exception:  # noqa: BLE001
+                pass
+        with self._clients_lock:
+            self._clients.clear()
+        if self._stopped is not None:
+            self._stopped.set()
+
+    def stop(self, *, timeout: float = 3.0) -> None:
+        """Остановить сервер и закрыть клиентов."""
+        loop = self._async_loop
+        if loop is not None and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+                future.result(timeout=timeout)
+            except Exception as exc:  # noqa: BLE001 - остановка не должна падать
+                logger.warning("api: остановка: {}: {}", type(exc).__name__, exc)
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+        self._thread = None
+        self._async_loop = None
+        self._remove_log_sink()
+        if self._ready.is_set():
+            logger.info("api: сервер остановлен")
+
+    # --- события ---
+
+    def broadcast(self, event: dict[str, Any]) -> bool:
+        """Отправить событие всем клиентам. False — клиентов/цикла нет."""
+        loop = self._async_loop
+        with self._clients_lock:
+            clients = list(self._clients)
+        if not clients or loop is None or not loop.is_running():
+            return False
+        payload = json.dumps(event, ensure_ascii=False)
+        try:
+            asyncio.run_coroutine_threadsafe(self._send_all(payload), loop)
+        except RuntimeError:
+            return False
+        return True
+
+    async def _send_all(self, payload: str) -> None:
+        for websocket in list(self._clients):
+            try:
+                await websocket.send(payload)
+            except Exception:  # noqa: BLE001 - мёртвый клиент убираем
+                with self._clients_lock:
+                    self._clients.discard(websocket)
+
+    def status(self) -> dict[str, Any]:
+        """Снимок состояния ядра для события/команды status."""
+        core = self._core
+        data: dict[str, Any] = {}
+        snapshot = getattr(core, "status_snapshot", None)
+        if callable(snapshot):
+            try:
+                data = dict(snapshot())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("api: status ядра недоступен: {}", exc)
+        if not data:
+            data = {
+                "state": str(getattr(core, "state", "IDLE")) if core is not None else "IDLE",
+                "budget_used": 0.0,
+                "window_open": bool(getattr(core, "window_until", 0.0)),
+            }
+        return {
+            "state": str(data.get("state") or "IDLE"),
+            "budget_used": float(data.get("budget_used") or 0.0),
+            "volume": float(data.get("volume", get_tts_volume())),
+            "window_open": bool(data.get("window_open")),
+        }
+
+    def broadcast_status(self, **fields: Any) -> bool:
+        payload = self.status()
+        payload.update(fields)
+        return self.broadcast({"event": "status", **payload})
+
+    def info(self, text: str) -> bool:
+        return self.broadcast({"event": "info", "text": str(text)})
+
+    def ask(self, question: str, options: list[str] | None = None) -> str | None:
+        return self.pending.ask(question, options)
+
+    def confirm(self, title: str, body: str = "", details: str = "") -> bool:
+        return self.pending.confirm(title, body, details)
+
+    def tail_logs(self, n: int = 20) -> list[str]:
+        limit = max(1, min(LOG_RING_SIZE, int(n)))
+        with self._ring_lock:
+            return list(self._ring)[-limit:]
+
+    def gaps(self, limit: int = 10) -> list[dict[str, Any]]:
+        from kivi.skills.gaps import get_gap_log
+
+        return get_gap_log().list_recent(limit=max(1, int(limit)))
+
+    def memory_items(self, kind: str = "profile") -> list[dict[str, str]]:
+        from kivi.memory.vault import list_notes, vault_root
+
+        valid = str(kind or "profile").strip().lower()
+        if valid not in ("profile", "journal", "topics", "people"):
+            valid = "profile"
+        root = vault_root()
+        items: list[dict[str, str]] = []
+        for path in list_notes(valid)[:20]:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            try:
+                name = str(path.relative_to(root)).replace("\\", "/")
+            except ValueError:
+                name = path.name
+            items.append({"name": name, "text": text[:2000]})
+        return items
+
+    # --- обработка клиентов ---
+
+    async def _handler(self, websocket: Any) -> None:
+        peer = getattr(websocket, "remote_address", None)
+        peer_host = str(peer[0]) if peer else ""
+        if peer_host not in ("127.0.0.1", "::1"):
+            logger.warning("api: клиент {} не loopback — закрываю", peer_host)
+            await websocket.close()
+            return
+        with self._clients_lock:
+            self._clients.add(websocket)
+        try:
+            await websocket.send(
+                json.dumps({"event": "status", **self.status()}, ensure_ascii=False)
+            )
+            async for raw in websocket:
+                await self._handle_message(websocket, raw)
+        except ConnectionClosed:
+            pass
+        finally:
+            with self._clients_lock:
+                self._clients.discard(websocket)
+
+    async def _reply(self, websocket: Any, payload: dict[str, Any]) -> None:
+        try:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+        except Exception:  # noqa: BLE001 - клиент мог отвалиться
+            pass
+
+    async def _handle_message(self, websocket: Any, raw: str | bytes) -> None:
+        try:
+            message = json.loads(raw)
+        except (ValueError, TypeError):
+            await self._reply(websocket, {"ok": False, "error": "bad json"})
+            return
+        if not isinstance(message, dict):
+            await self._reply(websocket, {"ok": False, "error": "expected object"})
+            return
+        command = str(message.get("command") or message.get("cmd") or "").strip()
+
+        if command == "get_status":
+            await self._reply(websocket, {"ok": True, **self.status()})
+        elif command == "set_volume":
+            volume = set_tts_volume(message.get("v"))
+            self.broadcast_status(volume=volume)
+            await self._reply(websocket, {"ok": True, "volume": volume})
+        elif command == "get_gaps":
+            try:
+                limit = int(message.get("limit") or 10)
+            except (TypeError, ValueError):
+                limit = 10
+            await self._reply(websocket, {"ok": True, "gaps": self.gaps(limit)})
+        elif command == "get_memory":
+            kind = str(message.get("kind") or "profile")
+            await self._reply(
+                websocket,
+                {"ok": True, "kind": kind, "items": self.memory_items(kind)},
+            )
+        elif command == "ask":
+            question = str(message.get("question") or "")
+            options = [
+                str(item) for item in (message.get("options") or []) if str(item).strip()
+            ]
+            answer = await asyncio.to_thread(self.pending.ask, question, options)
+            await self._reply(websocket, {"ok": True, "answer": answer})
+        elif command == "confirm":
+            answer = await asyncio.to_thread(
+                self.pending.confirm,
+                str(message.get("title") or ""),
+                str(message.get("body") or ""),
+                str(message.get("details") or ""),
+            )
+            await self._reply(websocket, {"ok": True, "confirmed": bool(answer)})
+        elif command == "info":
+            self.info(str(message.get("text") or ""))
+            await self._reply(websocket, {"ok": True})
+        elif command == "tail_logs":
+            try:
+                n = int(message.get("n") or 20)
+            except (TypeError, ValueError):
+                n = 20
+            await self._reply(websocket, {"ok": True, "lines": self.tail_logs(n)})
+        elif command == "ask_response":
+            resolved = self.pending.resolve_ask(
+                str(message.get("id") or ""), message.get("answer")
+            )
+            await self._reply(websocket, {"ok": resolved})
+        elif command == "confirm_response":
+            resolved = self.pending.resolve_confirm(
+                str(message.get("id") or ""), bool(message.get("ok"))
+            )
+            await self._reply(websocket, {"ok": resolved})
+        elif command == "shutdown":
+            await self._reply(websocket, {"ok": True})
+            callback = self._shutdown_callback
+            if callback is not None:
+                threading.Thread(
+                    target=callback, name="kivi-api-shutdown", daemon=True
+                ).start()
+        else:
+            await self._reply(
+                websocket, {"ok": False, "error": f"unknown command {command!r}"}
+            )
