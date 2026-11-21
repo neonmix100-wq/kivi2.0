@@ -1,4 +1,4 @@
-Перед любой задачей прочитай PROJECT_STATE.md — это актуальное состояние проекта.
+Перед любой задачей прочитай README.md — это актуальное состояние проекта.
 
 Always read AGENTS.md and config.yaml before starting any task.
 Treat them as hard constraints, not suggestions.
