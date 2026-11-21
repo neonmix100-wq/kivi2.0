@@ -48,7 +48,7 @@ def _reporter(loop: WakeLoop, router: Router, stop: threading.Event) -> None:
     """Фоновый отчёт о состоянии и бюджете (daemon)."""
     while not stop.wait(REPORT_INTERVAL_S):
         logger.info(
-            "состояние: {} | бюджет: {} | окно ожидания: {}",
+            "состояние: {} | бюджет: {} | окно диалога: {}",
             loop.state,
             router.budget.describe(),
             "да" if loop.window_until else "нет",

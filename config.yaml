@@ -45,7 +45,7 @@ memory:
   reflect_every_turns: 20
   reflect_on_idle_min: 10
   retrieve_k: 4
-  embed_model: "bge-multilingual-gemma2"
+  embed_model: "baai/bge-m3"
 
 speaker:
   enabled: true
@@ -100,8 +100,8 @@ search:
 
 conversation:
   enabled: true
-  window_s: 25              # окно диалога после ответа: продолжение без имени
-  end_phrases: ["спасибо", "всё", "пока", "отбой", "не надо", "хватит", "замолчи"]
+  silence_s: 8              # окно = тишина пользователя после её ответа
+  end_phrases: ["конец диалога", "заверши диалог", "отбой"]
   greeting_phrases: ["привет", "здравствуй", "хай", "приветик", "добрый день",
                      "добрый вечер"]
 

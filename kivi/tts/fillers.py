@@ -248,9 +248,8 @@ def _store_phrase(
 
 
 def _entries(context: str) -> list[dict[str, Any]]:
-    ctx = normalize_context(context)
-    with _LOCK:
-        return _read_entries(ctx)
+    """Индекс читаем без блокировки: запись идёт атомарной заменой файла."""
+    return _read_entries(normalize_context(context))
 
 
 def phrases(context: str) -> list[str]:
@@ -309,10 +308,14 @@ def ensure_library(
 
 
 def pick(context: str) -> str | None:
-    """Случайная фраза контекста, отличная от последней сыгранной."""
+    """Случайная готовая фраза контекста (без генерации и без ожидания).
+
+    Если библиотека ещё не прогрета — None: вводную просто пропускаем.
+    """
     ctx = normalize_context(context)
-    texts = ensure_library(ctx, min_count=1)
+    texts = [entry["text"] for entry in _entries(ctx)]
     if not texts:
+        logger.debug("вводные: {} ещё не готовы — пропускаю", ctx)
         return None
     last = _LAST.get(ctx)
     options = [text for text in texts if text != last]

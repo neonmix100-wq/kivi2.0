@@ -43,7 +43,9 @@ from kivi.skills.registry import (
     normalize_text,
 )
 from kivi.skills.search import (
+    NO_DATA_ANSWER,
     SearchConfig,
+    answer_search,
     load_search_config,
     looks_factual,
     search_web,
@@ -209,6 +211,9 @@ class SearchStrategy:
         self._summarize = (
             summarizer if summarizer is not None else summarize_with_llm
         )
+        # Если источник поиска/сводки внедрён (тесты) — идём старым путём,
+        # иначе используем контекстный answer_search (без сырых запросов).
+        self._injected = searcher is not None or summarizer is not None
 
     def attempt(self, gap: dict[str, Any]) -> tuple[bool, str, str]:
         if not self.config.enabled:
@@ -219,6 +224,21 @@ class SearchStrategy:
                 "пробел {}: не фактический вопрос — поиск не нужен", gap.get("id")
             )
             return False, self.name, ""
+
+        if not self._injected:
+            answer = answer_search(
+                command,
+                None,
+                router=self.router,
+                max_results=self.config.max_results,
+                timeout=self.config.timeout_s,
+            )
+            answer = " ".join(str(answer or "").split())
+            if not answer or answer == NO_DATA_ANSWER:
+                logger.info("пробел {}: поиск не дал ответа", gap.get("id"))
+                return False, self.name, ""
+            logger.info("пробел {}: ответ из интернета", gap.get("id"))
+            return True, self.name, f"Нашла в интернете: {answer}"
 
         results = self._search(
             command,

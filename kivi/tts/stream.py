@@ -33,7 +33,6 @@ from kivi.brain.persona import to_speech
 from kivi.config import get_settings
 from kivi.log import logger
 from kivi.tts import fillers
-from kivi.tts.cache import synthesize_cached
 from kivi.tts.speak import TMP_DIR, _move_to_slot, _tts_settings, mp3_to_pcm, synthesize_mp3
 
 __all__ = [
@@ -256,11 +255,14 @@ class SentenceSpeaker:
             self._audio_q.put(None)
 
     def _ack_pcm(self, text: str) -> np.ndarray | None:
-        """PCM вводной: mp3 из библиотеки fillers или синтез через tts_cache."""
+        """PCM вводной: только готовый mp3 из библиотеки (без синтеза на лету)."""
         try:
             mp3 = fillers.audio_path(self.context, text)
             if mp3 is None:
-                mp3 = synthesize_cached(text, model=self.model_id, voice=self.voice_id)
+                logger.debug(
+                    "озвучка: вводной «{}» нет в библиотеке — молчу", text
+                )
+                return None
             pcm_path = mp3_to_pcm(
                 mp3,
                 samplerate=self._output_sr,

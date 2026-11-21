@@ -126,7 +126,7 @@ def main() -> int:
         recorder=FakeRecorder(),
         speak_fn=spoken.append,
         session=Session(db_path=SESSION_DB),
-        window_s=25,
+        silence_s=8,
     )
 
     results: list[Any] = []
@@ -171,8 +171,8 @@ def main() -> int:
             f"{loop.window_until - time.monotonic():.1f} c",
         )
         ok &= check(
-            "лог «окно открыто (25с)»",
-            any("диалог: окно открыто (25с)" in line for line in logs.messages),
+            "лог «окно открыто (8с тишины)»",
+            any("диалог: окно открыто (8с тишины)" in line for line in logs.messages),
         )
 
         with LogCatcher() as logs:
@@ -204,17 +204,39 @@ def main() -> int:
             any("диалог: режим ожидание имени" in line for line in logs.messages),
         )
 
-        print("\n--- 3) «спасибо» закрывает окно без ответа ---")
+        print("\n--- 3) «конец диалога» закрывает окно без ответа ---")
         loop._open_window()
         before_think = len(think_calls)
         with LogCatcher() as logs:
-            feed("спасибо")
+            feed("конец диалога")
         print(f"    window_until={loop.window_until}, think={len(think_calls)}")
         ok &= check("окно закрыто", loop.window_until == 0.0)
         ok &= check("ответа нет", len(think_calls) == before_think)
         ok &= check(
             "лог «окно закрыто по фразе»",
             any("диалог: окно закрыто по фразе" in line for line in logs.messages),
+        )
+
+        print("\n--- 3b) «спасибо» НЕ закрывает окно ---")
+        loop._open_window()
+        before_think = len(think_calls)
+        feed("спасибо")
+        print(f"    window_until={loop.window_until}, think={think_calls[-1:]}")
+        ok &= check(
+            "«спасибо» стало командой",
+            len(think_calls) == before_think + 1 and think_calls[-1] == "спасибо",
+        )
+        ok &= check("окно осталось открытым", loop.window_until > time.monotonic())
+
+        print("\n--- 3c) тишина > 8 с закрывает окно ---")
+        loop.window_until = time.monotonic() - 0.1
+        with LogCatcher() as logs:
+            loop._expire_window()
+        print(f"    window_until={loop.window_until}")
+        ok &= check("окно закрыто по тишине", loop.window_until == 0.0)
+        ok &= check(
+            "лог «окно закрыто по тишине»",
+            any("диалог: окно закрыто по тишине" in line for line in logs.messages),
         )
 
         print("\n--- 4) «Киви» без команды -> «Слушаю» + окно ---")
@@ -261,11 +283,14 @@ def main() -> int:
         ok &= check("ответ не запускался", len(think_calls) == before_think)
 
         print("\n--- 7) фразы завершения из конфига ---")
-        ok &= check("end_phrases из config.yaml", "спасибо" in loop.end_phrases)
+        ok &= check(
+            "«конец диалога» в end_phrases", "конец диалога" in loop.end_phrases
+        )
+        ok &= check("«спасибо» больше не закрывает", "спасибо" not in loop.end_phrases)
         ok &= check(
             "greeting_phrases из config.yaml", "привет" in loop.greeting_phrases
         )
-        ok &= check("window_s = 25", loop.window_s == 25.0, str(loop.window_s))
+        ok &= check("silence_s = 8", loop.silence_s == 8.0, str(loop.silence_s))
     finally:
         loop_module.transcribe_wav = original_transcribe  # type: ignore[assignment]
 

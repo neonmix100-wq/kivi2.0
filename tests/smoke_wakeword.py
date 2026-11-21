@@ -71,7 +71,7 @@ def run_simulated(loop: WakeLoop, results: list[WakeResult]) -> None:
 
     import kivi.wake.loop as loop_module
 
-    script = ["Киви", "Киви, привет", "который час", "спасибо"]
+    script = ["Киви", "Киви, привет", "который час", "конец диалога"]
 
     def fake_transcribe(path):  # noqa: ANN001, ARG001
         return script.pop(0) if script else ""
@@ -125,7 +125,7 @@ def report(results: list[WakeResult], *, simulated: bool = False) -> int:
         print("X   ни одного срабатывания по имени «Киви»")
         ok = False
     if simulated and (len(listens) < 1 or len(thinks) < 2 or len(idle) < 1):
-        print("X   симуляция: ожидались имя, приветствие, продолжение и «спасибо»")
+        print("X   симуляция: ожидались имя, приветствие, продолжение и «конец диалога»")
         ok = False
     print()
     print("PASS" if ok else "FAIL — скопируй весь вывод и пришли в чат")

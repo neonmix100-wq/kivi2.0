@@ -31,6 +31,7 @@ from loguru import logger
 
 from kivi.log import setup_logging
 from kivi.skills.search import (
+    NOT_FOUND,
     SearchConfig,
     load_search_config,
     looks_factual,
@@ -207,10 +208,13 @@ def main() -> int:
     user_text = str(router.calls[0]["messages"][1]["content"]) if router.calls else ""
     ok &= check("в промпте есть запрос", LIVE_QUERY in system_text)
     ok &= check("результаты обёрнуты в <untrusted>", "<untrusted>" in user_text)
-    ok &= check("без результатов -> пусто", summarize_with_llm(LIVE_QUERY, [], router=router) == "")
     ok &= check(
-        "ошибка LLM -> пусто",
-        summarize_with_llm(LIVE_QUERY, sample, router=BrokenRouter()) == "",
+        "без результатов -> NOT_FOUND",
+        summarize_with_llm(LIVE_QUERY, [], router=router) == NOT_FOUND,
+    )
+    ok &= check(
+        "ошибка LLM -> NOT_FOUND",
+        summarize_with_llm(LIVE_QUERY, sample, router=BrokenRouter()) == NOT_FOUND,
     )
 
     print("\n--- 6) таймаут и ошибка поиска ---")

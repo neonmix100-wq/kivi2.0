@@ -219,7 +219,7 @@ def main() -> int:
             {"title": "Курс", "url": "https://example.com", "snippet": "90000"}
         ]
         search_module.summarize_with_llm = (
-            lambda query, results, router=None, **kw: summary_text
+            lambda query, results, history=None, router=None, **kw: summary_text
         )
 
         FakeSpeaker.instances.clear()
@@ -236,9 +236,14 @@ def main() -> int:
             speaker is not None and speaker.fed == [summary_text],
             str(len(speaker.fed)) if speaker else "нет",
         )
+        chat_calls = [
+            call
+            for call in loop.router.calls
+            if call.endswith(":chat") or call.startswith("stream:")
+        ]
         ok &= check(
             "Router.chat не вызывался вторым",
-            loop.router.calls == [],
+            chat_calls == [],
             str(loop.router.calls),
         )
         ok &= check("speak_fn не дублирует озвучку", spoken == [], str(spoken))
@@ -253,7 +258,7 @@ def main() -> int:
         print(f"    сказано: {speaker.fed}, пробелов: {len(rows)}")
         ok &= check(
             "одна реплика про свежие данные",
-            speaker.fed == ["Не нашла свежих данных по этому вопросу."],
+            speaker.fed == ["Не нашла свежих данных."],
             str(speaker.fed),
         )
         ok &= check(
@@ -261,7 +266,14 @@ def main() -> int:
             any(row["command"] == "какой курс биткоина" for row in rows),
             str(len(rows)),
         )
-        ok &= check("Router не вызывался и здесь", loop.router.calls == [])
+        ok &= check(
+            "Router.chat не вызывался и здесь",
+            not any(
+                call.endswith(":chat") or call.startswith("stream:")
+                for call in loop.router.calls
+            ),
+            str(loop.router.calls),
+        )
 
         print("\n--- 4) loop: action_gap -> одна реплика без Router ---")
         loop.gaps = make_gaps()
@@ -279,6 +291,7 @@ def main() -> int:
             }
         )
         FakeSpeaker.instances.clear()
+        before_router = len(loop.router.calls)
         loop._think_and_speak("включи свет")
         speaker = FakeSpeaker.instances[-1]
         print(f"    сказано: {speaker.fed}")
@@ -287,7 +300,9 @@ def main() -> int:
             len(speaker.fed) == 1 and "Пока не могу" in speaker.fed[0],
             str(speaker.fed),
         )
-        ok &= check("Router не вызывался", loop.router.calls == [])
+        ok &= check(
+            "Router не вызывался", len(loop.router.calls) == before_router
+        )
     finally:
         search_module.search_web = original_search
         search_module.summarize_with_llm = original_summary

@@ -10,8 +10,9 @@
       route=search      -> search_web + summarize -> SPEAKING (одна реплика)
       route=action_gap  -> пробел: GapCloser или короткий честный ответ
       route=chat        -> Router.complete_stream + SentenceSpeaker
-    После любого ответа: окно диалога открыто ещё window_s секунд — продолжение
-    можно говорить без имени. Фразы «спасибо/пока/хватит…» закрывают окно.
+    После любого ответа: окно диалога открыто ещё silence_s секунд тишины —
+    продолжение можно говорить без имени. Фразы «конец диалога/отбой» закрывают
+    окно, а тишина дольше silence_s закрывает его автоматически.
     Ровно один ответ на команду; второй ответ через chat запрещён.
 
 Никаких облачных вызовов для проверки имени: распознаёт локальный faster-whisper.
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "COOLDOWN_S",
+    "DIALOG_SILENCE_S",
     "DIALOG_WINDOW_S",
     "END_PHRASES",
     "FOLLOWUP_WINDOW_S",
@@ -62,10 +64,11 @@ WARMUP_SECONDS = 0.25
 MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 15.0
 COOLDOWN_S = 1.5
-DIALOG_WINDOW_S = 25.0
-FOLLOWUP_WINDOW_S = DIALOG_WINDOW_S  # устаревшее имя, оставлено для совместимости
+DIALOG_SILENCE_S = 8.0
+DIALOG_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя, оставлено для совместимости
+FOLLOWUP_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя
 ACK_PHRASE = "Слушаю"
-END_PHRASES = ("спасибо", "всё", "пока", "отбой", "не надо", "хватит", "замолчи")
+END_PHRASES = ("конец диалога", "заверши диалог", "отбой")
 GREETING_PHRASES = (
     "привет",
     "здравствуй",
@@ -186,8 +189,7 @@ class WakeLoop:
         think_fn: Callable[[str], str] | None = None,
         on_result: Callable[[WakeResult], None] | None = None,
         session: Session | None = None,
-        window_s: float | None = None,
-        followup_window_s: float | None = None,
+        silence_s: float | None = None,
         cooldown_s: float = COOLDOWN_S,
     ) -> None:
         _ensure_wake_log()
@@ -203,22 +205,19 @@ class WakeLoop:
         self.think_fn = think_fn
         self.on_result = on_result
         self.session = session
-        self.followup_window_s = float(followup_window_s) if followup_window_s else 0.0
         self.cooldown_s = float(cooldown_s)
 
-        # Окно диалога: после ответа продолжаем слушать без имени.
+        # Окно диалога = тишина пользователя после ответа Киви.
         conversation = self.settings.section("conversation")
         self.conversation_enabled = bool(conversation.get("enabled", True))
-        configured_window = conversation.get("window_s")
-        chosen_window = (
-            window_s
-            if window_s is not None
-            else (followup_window_s if followup_window_s is not None else configured_window)
-        )
+        configured_silence = conversation.get("silence_s")
+        chosen_silence = silence_s if silence_s is not None else configured_silence
         try:
-            self.window_s = max(1.0, float(chosen_window if chosen_window else DIALOG_WINDOW_S))
+            self.silence_s = max(
+                1.0, float(chosen_silence if chosen_silence else DIALOG_SILENCE_S)
+            )
         except (TypeError, ValueError):
-            self.window_s = DIALOG_WINDOW_S
+            self.silence_s = DIALOG_SILENCE_S
         self.end_phrases = tuple(conversation.get("end_phrases") or END_PHRASES)
         self.greeting_phrases = tuple(
             conversation.get("greeting_phrases") or GREETING_PHRASES
@@ -274,7 +273,7 @@ class WakeLoop:
             "WakeLoop готов: вход [{}] {}, окно {:.0f} c, cooldown {:.1f} c, память: {}",
             devices.input_index,
             devices.input_name,
-            self.window_s,
+            self.silence_s,
             self.cooldown_s,
             "вкл" if self.memory_enabled else "выкл",
         )
@@ -377,14 +376,14 @@ class WakeLoop:
     def _expire_window(self) -> None:
         if self.window_until and time.monotonic() > self.window_until:
             self.window_until = 0.0
-            wake_log.info("диалог: окно истекло — ожидание имени")
+            wake_log.info("диалог: окно закрыто по тишине")
 
     def _open_window(self) -> None:
-        """Открыть окно диалога: продолжение можно говорить без имени."""
+        """Открыть окно диалога: тишина пользователя после ответа Киви."""
         if not self.conversation_enabled:
             return
-        self.window_until = time.monotonic() + self.window_s
-        wake_log.info("диалог: окно открыто ({:.0f}с)", self.window_s)
+        self.window_until = time.monotonic() + self.silence_s
+        wake_log.info("диалог: окно открыто ({:.0f}с тишины)", self.silence_s)
 
     def _close_window(self, reason: str = "") -> None:
         if not self.window_until:
@@ -587,11 +586,12 @@ class WakeLoop:
         wake_log.info("вернулся в IDLE")
 
     def _answer_search(self, command: str, plan: dict | None, started: float) -> None:
-        """Поиск в интернете + сводка: одна озвучка, без Router.chat вторым."""
-        from kivi.skills.search import search_web, summarize_with_llm
+        """Поиск по переформулированному запросу; ровно одна озвучка."""
+        from kivi.skills.search import NO_DATA_ANSWER, answer_search
 
         self.state = "THINKING"
         wake_log.info("THINKING -> search: {!r}", command)
+        session = self._get_session()
         settings = self.search_config or {}
         try:
             max_results = int(settings.get("max_results") or 3)
@@ -603,20 +603,23 @@ class WakeLoop:
         self._speaker = speaker
         text = ""
         try:
-            results = search_web(command, max_results=max_results, timeout=timeout_s)
-            answer = (
-                summarize_with_llm(command, results, router=self.router)
-                if results
-                else ""
+            # Контекстный поиск: LLM переформулирует команду (ослышки/валюта),
+            # ищем только по запросу; при NOT_FOUND — вторая попытка внутри.
+            text = answer_search(
+                command,
+                session.history(),
+                router=self.router,
+                max_results=max_results,
+                timeout=timeout_s,
             )
-            text = " ".join(str(answer).split())
+            text = " ".join(str(text or "").split())
         except Exception as exc:  # noqa: BLE001 - поиск не должен ронять цикл
             wake_log.error("поиск упал: {}: {}", type(exc).__name__, exc)
             text = ""
 
-        if not text:
+        if not text or text == NO_DATA_ANSWER:
             self._record_gap(command, plan, why="поиск не дал ответа")
-            text = "Не нашла свежих данных по этому вопросу."
+            text = NO_DATA_ANSWER
 
         try:
             self.state = "SPEAKING"

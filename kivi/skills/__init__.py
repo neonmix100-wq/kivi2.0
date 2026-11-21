@@ -35,9 +35,13 @@ from kivi.skills.registry import (
     load_skills_config,
 )
 from kivi.skills.search import (
+    NO_DATA_ANSWER,
+    NOT_FOUND,
     SearchConfig,
+    answer_search,
     load_search_config,
     looks_factual,
+    reformulate_query,
     search_web,
     summarize_with_llm,
 )
@@ -45,6 +49,8 @@ from kivi.skills.search import (
 __all__ = [
     "DEFAULT_MIN_SCORE",
     "STRATEGIES",
+    "NO_DATA_ANSWER",
+    "NOT_FOUND",
     "AskUserStrategy",
     "ComposeStrategy",
     "GapCloser",
@@ -63,6 +69,7 @@ __all__ = [
     "SkillSource",
     "SkillStats",
     "build_catalog",
+    "answer_search",
     "get_gap_log",
     "get_registry",
     "get_top_gaps",
@@ -74,6 +81,7 @@ __all__ = [
     "looks_factual",
     "parse_response",
     "plan_with_llm",
+    "reformulate_query",
     "search_web",
     "summarize_with_llm",
 ]
