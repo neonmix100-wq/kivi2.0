@@ -12,6 +12,7 @@ from kivi.skills.gap_closer import (
     GapCloser,
     GapCloserConfig,
     ReactivateStrategy,
+    SearchStrategy,
     load_gap_config,
 )
 from kivi.skills.gaps import GapLog, get_gap_log
@@ -33,6 +34,13 @@ from kivi.skills.registry import (
     get_registry,
     load_skills_config,
 )
+from kivi.skills.search import (
+    SearchConfig,
+    load_search_config,
+    looks_factual,
+    search_web,
+    summarize_with_llm,
+)
 
 __all__ = [
     "DEFAULT_MIN_SCORE",
@@ -45,6 +53,7 @@ __all__ = [
     "PermissionDenied",
     "Planner",
     "ReactivateStrategy",
+    "SearchStrategy",
     "SkillContext",
     "SkillLoadError",
     "SkillManifest",
@@ -60,8 +69,12 @@ __all__ = [
     "invoke",
     "load",
     "load_gap_config",
+    "load_search_config",
     "load_skills_config",
+    "looks_factual",
     "parse_response",
     "plan_with_llm",
+    "search_web",
+    "summarize_with_llm",
 ]
 

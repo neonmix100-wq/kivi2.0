@@ -5,11 +5,14 @@
 
   1. ReactivateStrategy — включить похожее выключенное умение (difflib по имени,
      триггерам и намерениям; порог gap_closer.reactivate_threshold);
-  2. ComposeStrategy    — LLM (task_type=intent) предлагает композицию из
+  2. SearchStrategy     — фактический вопрос (кто/что/когда/…): поиск в интернете
+     (DuckDuckGo) + короткая сводка через LLM;
+  3. ComposeStrategy    — LLM (task_type=intent) предлагает композицию из
      существующих умений: {"skills": [...], "how": "..."};
-  3. AskUserStrategy    — LLM (task_type=chat) даёт 1-2 уточняющих вопроса.
+  4. AskUserStrategy    — LLM (task_type=chat) даёт 1-2 уточняющих вопроса.
 
-Первая успешная стратегия закрывает пробел: closed_how = reactivate|compose.
+Порядок: reactivate -> search -> compose -> ask (поиск дешевле композиции).
+Первая успешная стратегия закрывает пробел: closed_how = reactivate|search|compose.
 Если успеха нет — пробел закрывается как ask (вопросы уже заданы), чтобы
 не переспрашивать одно и то же каждый раз.
 
@@ -39,6 +42,13 @@ from kivi.skills.registry import (
     get_registry,
     normalize_text,
 )
+from kivi.skills.search import (
+    SearchConfig,
+    load_search_config,
+    looks_factual,
+    search_web,
+    summarize_with_llm,
+)
 
 __all__ = [
     "AskUserStrategy",
@@ -47,6 +57,7 @@ __all__ = [
     "GapCloser",
     "GapCloserConfig",
     "ReactivateStrategy",
+    "SearchStrategy",
     "load_gap_config",
     "skill_similarity",
 ]
@@ -166,6 +177,69 @@ class ReactivateStrategy:
             return False, self.name, ""
         message = f"Включила умение «{best.name}» — попробуй ещё раз."
         logger.info("пробел {}: реактивировано умение {}", gap.get("id"), best.name)
+        return True, self.name, message
+
+
+class SearchStrategy:
+    """Фактический вопрос: искать в интернете и коротко пересказать через LLM."""
+
+    name = "search"
+
+    def __init__(
+        self,
+        router: Any | None,
+        config: dict[str, Any] | SearchConfig | None = None,
+        *,
+        searcher: Any | None = None,
+        summarizer: Any | None = None,
+    ) -> None:
+        if isinstance(config, SearchConfig):
+            self.config = config
+        else:
+            raw = dict(config) if config is not None else load_search_config()
+            try:
+                self.config = SearchConfig.model_validate(raw)
+            except ValidationError as exc:
+                logger.warning(
+                    "поиск: конфиг search невалиден ({}), беру умолчания", exc
+                )
+                self.config = SearchConfig()
+        self.router = router
+        self._search = searcher if searcher is not None else search_web
+        self._summarize = (
+            summarizer if summarizer is not None else summarize_with_llm
+        )
+
+    def attempt(self, gap: dict[str, Any]) -> tuple[bool, str, str]:
+        if not self.config.enabled:
+            return False, self.name, ""
+        command = str(gap.get("command") or gap.get("user_intent") or "").strip()
+        if not command or not looks_factual(command, self.config.fact_keywords):
+            logger.debug(
+                "пробел {}: не фактический вопрос — поиск не нужен", gap.get("id")
+            )
+            return False, self.name, ""
+
+        results = self._search(
+            command,
+            max_results=self.config.max_results,
+            timeout=self.config.timeout_s,
+        )
+        if not results:
+            logger.info("пробел {}: поиск не дал результатов", gap.get("id"))
+            return False, self.name, ""
+
+        answer = " ".join(str(self._summarize(command, results, router=self.router) or "").split())
+        if not answer:
+            logger.info("пробел {}: LLM не дала сводку по поиску", gap.get("id"))
+            return False, self.name, ""
+
+        message = f"Нашла в интернете: {answer}"
+        logger.info(
+            "пробел {}: ответ из интернета ({} результатов)",
+            gap.get("id"),
+            len(results),
+        )
         return True, self.name, message
 
 
@@ -302,6 +376,9 @@ class GapCloser:
         gaps: GapLog | None = None,
         config: dict[str, Any] | GapCloserConfig | None = None,
         *,
+        search_config: dict[str, Any] | SearchConfig | None = None,
+        searcher: Any | None = None,
+        summarizer: Any | None = None,
         max_catalog_tokens: int = DEFAULT_CATALOG_TOKENS,
     ) -> None:
         if isinstance(config, GapCloserConfig):
@@ -322,6 +399,12 @@ class GapCloser:
         self.strategies = [
             ReactivateStrategy(
                 self.registry, threshold=self.config.reactivate_threshold
+            ),
+            SearchStrategy(
+                self.router,
+                search_config,
+                searcher=searcher,
+                summarizer=summarizer,
             ),
             ComposeStrategy(
                 self.router,

@@ -5,12 +5,12 @@
   * чанки ~2-3 предложения (200-300 символов), чтобы реже сбрасывать просодию;
   * между чанками кроссфейд 30 мс — нет щелчка и рваного стыка;
   * если первый чанк не готов за 1.5 с — один раз звучит короткая вводная
-    из tts_cache («Секунду»/«Мгновение»/«Так, думаю») тем же потоком;
-    фраза запоминается как «сыгранная» и не повторяется в следующий раз,
-    а если вариантов меньше двух — вводная не играется вовсе.
+    из библиотеки kivi.tts.fillers (контекст: think/search/code) тем же
+    потоком; фраза запоминается как «сыгранная» и не повторяется подряд,
+    а если вариантов нет — вводная не играется вовсе.
 
 Использование:
-    speaker = SentenceSpeaker(started_at=time.perf_counter())
+    speaker = SentenceSpeaker(started_at=time.perf_counter(), context="think")
     for chunk in router.complete_stream(messages):
         speaker.feed(chunk)
     total = speaker.finish()
@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import queue
-import random
 import re
 import threading
 import time
@@ -33,12 +32,12 @@ import sounddevice as sd
 from kivi.brain.persona import to_speech
 from kivi.config import get_settings
 from kivi.log import logger
+from kivi.tts import fillers
 from kivi.tts.cache import synthesize_cached
 from kivi.tts.speak import TMP_DIR, _move_to_slot, _tts_settings, mp3_to_pcm, synthesize_mp3
 
 __all__ = [
     "ACK_DELAY_S",
-    "ACK_PHRASES",
     "FIRST_CHUNK_MAX",
     "FIRST_CHUNK_MIN",
     "MAX_CHUNK_CHARS",
@@ -46,8 +45,6 @@ __all__ = [
     "OVERLAP_MS",
     "TARGET_CHUNK_CHARS",
     "SentenceSpeaker",
-    "last_ack_phrase",
-    "pick_ack_phrase",
 ]
 
 MIN_SENTENCE_CHARS = 20
@@ -57,13 +54,9 @@ TARGET_CHUNK_CHARS = 250  # 2-3 предложения в чанке
 MAX_CHUNK_CHARS = 320
 OVERLAP_MS = 30  # кроссфейд на стыке чанков
 ACK_DELAY_S = 1.5
-ACK_PHRASES: tuple[str, ...] = ("Секунду", "Мгновение", "Так, думаю")
 
 _SENTENCE_END = re.compile(r"[.!?…]+[\"'»)]?(?=\s)|\n+")
 _COMMA = ",;:"
-# Последняя РЕАЛЬНО СЫГРАННАЯ вводная: обновляется в плеере, а не при выборе,
-# иначе фраза «сгорает» беззвучно и следующий выбор может повторить слышимую.
-_last_ack: str | None = None
 
 
 @dataclass
@@ -74,33 +67,6 @@ class _AudioChunk:
     is_ack: bool = False
     text: str | None = None  # текст вводной (для лога и памяти о повторе)
     done: threading.Event | None = None  # ждём фактического проигрывания
-
-
-def pick_ack_phrase() -> str | None:
-    """Выбрать вводную, отличную от предыдущей сыгранной.
-
-    None означает «молчим»: если вариантов меньше двух, повторять одну и ту же
-    фразу бессмысленно — лучше не играть ничего.
-    """
-    if len(ACK_PHRASES) < 2:
-        logger.debug("озвучка: вводных меньше двух — играю молча")
-        return None
-    options = [phrase for phrase in ACK_PHRASES if phrase != _last_ack]
-    if not options:
-        logger.debug("озвучка: все вводные совпали с прошлой — играю молча")
-        return None
-    return random.choice(options)
-
-
-def _mark_ack_played(phrase: str) -> None:
-    """Запомнить вводную, которая действительно прозвучала."""
-    global _last_ack
-    _last_ack = phrase
-
-
-def last_ack_phrase() -> str | None:
-    """Какая вводная звучала последней (для логов и тестов)."""
-    return _last_ack
 
 
 class SentenceSpeaker:
@@ -114,12 +80,14 @@ class SentenceSpeaker:
         started_at: float | None = None,
         transform: Callable[[str], str] | None = None,
         ack_delay_s: float = ACK_DELAY_S,
+        context: str = "think",
     ) -> None:
         self.run_id = uuid.uuid4().hex[:8]
         self.model_id, self.voice_id = _tts_settings(model, voice)
         self.transform = transform or to_speech
         self.started_at = started_at if started_at is not None else time.perf_counter()
         self.ack_delay_s = float(ack_delay_s)
+        self.context = fillers.normalize_context(context)
 
         settings = get_settings()
         self._device_index = settings.devices.output_index
@@ -288,9 +256,11 @@ class SentenceSpeaker:
             self._audio_q.put(None)
 
     def _ack_pcm(self, text: str) -> np.ndarray | None:
-        """PCM вводной из tts_cache (синтез — только если фразы ещё нет в кэше)."""
+        """PCM вводной: mp3 из библиотеки fillers или синтез через tts_cache."""
         try:
-            mp3 = synthesize_cached(text, model=self.model_id, voice=self.voice_id)
+            mp3 = fillers.audio_path(self.context, text)
+            if mp3 is None:
+                mp3 = synthesize_cached(text, model=self.model_id, voice=self.voice_id)
             pcm_path = mp3_to_pcm(
                 mp3,
                 samplerate=self._output_sr,
@@ -307,10 +277,15 @@ class SentenceSpeaker:
         """Вводная фраза, если первый чанк не успел за ack_delay_s."""
         if self._stopping.is_set() or self._first_ready.is_set():
             return
-        text = pick_ack_phrase()
+        text = fillers.pick(self.context)
         if text is None:
             return
-        logger.debug("озвучка: выбрана вводная «{}» (порог {:.1f} с)", text, self.ack_delay_s)
+        logger.debug(
+            "озвучка: выбрана вводная «{}» (контекст {}, порог {:.1f} с)",
+            text,
+            self.context,
+            self.ack_delay_s,
+        )
         pcm = self._ack_pcm(text)
         if pcm is None:
             return
@@ -328,7 +303,7 @@ class SentenceSpeaker:
         if not self._play_thread.is_alive():
             logger.warning("озвучка: плеер уже закрыт — вводную не играю")
             return None
-        text = phrase if phrase is not None else pick_ack_phrase()
+        text = phrase if phrase is not None else fillers.pick(self.context)
         if text is None:
             return None
         pcm = self._ack_pcm(text)
@@ -435,7 +410,7 @@ class SentenceSpeaker:
                     if item.is_ack:
                         # «Сыграно» фиксируем здесь: только теперь фраза реально звучала.
                         if item.text:
-                            _mark_ack_played(item.text)
+                            fillers.mark_played(self.context, item.text)
                         logger.info(
                             "озвучка: вводная «{}» сыграна (id={}, t=+{:.2f} с, {:.2f} с)",
                             item.text,

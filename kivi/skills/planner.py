@@ -5,15 +5,18 @@
   * llm_only          — только LLM, без difflib;
   * fuzzy_only        — только difflib (офлайн, тесты).
 
-Если умения нет, пробел пишется в capability_gaps (data/kivi.db), а plan
-возвращает missing — чтобы ассистент честно сказал «пока не умею X».
+Если умения нет, план получает route:
+  * chat       — разговор/генерация, пробел НЕ пишется;
+  * search     — живые данные, пробел пишет loop только если поиск пуст;
+  * action_gap — действие без инструмента, пробел пишется здесь.
 
 Использование:
     from kivi.skills.planner import Planner, get_top_gaps
     planner = Planner()                       # общий реестр проекта
     found = planner.match("который час")      # (manifest, {}) | None
     plan = planner.plan("который час")
-    # {"skill": manifest|None, "args": {...}, "missing": [...], "source": "llm"}
+    # {"skill": manifest|None, "args": {...}, "missing": [...],
+    #  "route": "skill|chat|search|action_gap", "source": "llm"}
     get_top_gaps(10)                          # топ пробелов по частоте
 """
 
@@ -121,7 +124,14 @@ class Planner:
         """План обработки команды: скилл+аргументы или missing с причиной."""
         text = str(command or "").strip()
         if not text:
-            return {"skill": None, "args": {}, "missing": [], "source": "none"}
+            return {
+                "skill": None,
+                "args": {},
+                "missing": [],
+                "source": "none",
+                "route": "chat",
+                "gap_id": None,
+            }
 
         missing: list[dict[str, str]] = []
         attempted: str | None = None
@@ -143,6 +153,8 @@ class Planner:
                         "args": dict(args or {}),
                         "missing": [],
                         "source": "llm",
+                        "route": "skill",
+                        "gap_id": None,
                     }
                 logger.warning(
                     "планировщик: скилл {!r} пропал из реестра — ответ невалиден",
@@ -151,16 +163,27 @@ class Planner:
 
             attempted = meta.get("skill_attempted")
             if meta.get("ok"):
-                missing = list(llm_missing) or [
-                    {"capability": text, "why": "LLM не нашла подходящего умения"}
-                ]
-                return self._missing_plan(text, missing, attempted, source="llm")
+                route = str(meta.get("route") or "")
+                if route not in ("search", "action_gap", "chat"):
+                    route = "action_gap" if llm_missing else "chat"
+                if route == "action_gap":
+                    missing = list(llm_missing) or [
+                        {"capability": text, "why": "нет умения для действия"}
+                    ]
+                else:
+                    # chat и search закрываются без записи пробела.
+                    missing = []
+                return self._missing_plan(
+                    text, missing, attempted, source="llm", route=route
+                )
             if self.strategy == "llm_only" or not self.fallback_on_parse_error:
                 reason = str(meta.get("reason") or "llm_error")
                 missing = list(llm_missing) or [
                     {"capability": text, "why": f"планировщик не ответил: {reason}"}
                 ]
-                return self._missing_plan(text, missing, attempted, source="none")
+                return self._missing_plan(
+                    text, missing, attempted, source="none", route="action_gap"
+                )
             logger.info(
                 "планировщик: LLM не дала валидный план ({}) — пробую difflib",
                 meta.get("reason"),
@@ -174,11 +197,15 @@ class Planner:
                 "args": args,
                 "missing": [],
                 "source": "fuzzy",
+                "route": "skill",
+                "gap_id": None,
             }
 
         if not missing:
             missing = [{"capability": text, "why": "нет подходящего скилла"}]
-        return self._missing_plan(text, missing, attempted, source="none")
+        return self._missing_plan(
+            text, missing, attempted, source="none", route="action_gap"
+        )
 
     def _missing_plan(
         self,
@@ -187,14 +214,22 @@ class Planner:
         attempted: str | None,
         *,
         source: str,
+        route: str,
     ) -> dict[str, Any]:
-        """Умения нет: записать пробел и вернуть missing для озвучки."""
-        gap_id = self._record_gap(command, missing, attempted)
+        """Разговор/поиск — без пробела; action_gap — записываем и возвращаем id."""
+        gap_id: int | None = None
+        if route == "action_gap":
+            if not missing:
+                missing = [{"capability": command, "why": "нет умения для действия"}]
+            gap_id = self._record_gap(command, missing, attempted)
+        else:
+            missing = []
         return {
             "skill": None,
             "args": {},
             "missing": missing,
             "source": source,
+            "route": route,
             "gap_id": gap_id,
         }
 

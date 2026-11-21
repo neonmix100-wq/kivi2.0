@@ -32,6 +32,18 @@ __all__ = ["main"]
 REPORT_INTERVAL_S = 300.0  # раз в 5 минут пишем состояние и бюджет
 
 
+def _warm_fillers() -> None:
+    """Фоновый прогрев библиотеки вводных для всех контекстов (TTS + LLM, один раз)."""
+    try:
+        from kivi.tts.fillers import CONTEXTS, ensure_library
+
+        for context in CONTEXTS:
+            library = ensure_library(context)
+            logger.info("вводные: {} готовы ({} фраз)", context, len(library))
+    except Exception as exc:  # noqa: BLE001 - вводные не критичны для запуска
+        logger.warning("вводные: прогрев не удался: {}: {}", type(exc).__name__, exc)
+
+
 def _reporter(loop: WakeLoop, router: Router, stop: threading.Event) -> None:
     """Фоновый отчёт о состоянии и бюджете (daemon)."""
     while not stop.wait(REPORT_INTERVAL_S):
@@ -39,7 +51,7 @@ def _reporter(loop: WakeLoop, router: Router, stop: threading.Event) -> None:
             "состояние: {} | бюджет: {} | окно ожидания: {}",
             loop.state,
             router.budget.describe(),
-            "да" if loop.followup_deadline else "нет",
+            "да" if loop.window_until else "нет",
         )
 
 
@@ -79,6 +91,9 @@ def _run() -> int:
     print("Прогреваю распознавание (Whisper на CUDA)...", flush=True)
     warmup_stt()
     warmup_tts()  # keep-alive до TTS: первый синтез без TLS handshake
+    threading.Thread(
+        target=_warm_fillers, name="kivi-fillers-warmup", daemon=True
+    ).start()
     print(flush=True)
 
     reporter = threading.Thread(

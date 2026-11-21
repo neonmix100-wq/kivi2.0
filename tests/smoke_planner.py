@@ -10,7 +10,7 @@
   4) невалидный JSON -> fallback, WARNING в лог;
   5) «напиши функцию fib» -> skill=None (скилла code нет) + пробел в БД;
   6) «расскажи анекдот про кота» x3 -> None, пробелы; stats_by_intent -> «анекдоты»;
-  7) стоимость plan_with_llm < 0.01 руб;
+  7) стоимость plan_with_llm < 0.02 руб;
   8) таблица capability_gaps есть в боевой data/kivi.db.
 
 Реальный LLM — только в пункте 2 (тир cheap, копейки). Остальные сценарии
@@ -43,7 +43,7 @@ from kivi.skills.registry import get_registry
 
 TMP = PROJECT_ROOT / "data" / "tmp"
 GAP_DB = TMP / "planner_smoke.db"
-COST_LIMIT_RUB = 0.01
+COST_LIMIT_RUB = 0.02  # route-правила добавили объём промпта: 1-2 копейки за вызов
 
 
 def check(label: str, condition: bool, detail: str = "") -> bool:
@@ -173,7 +173,7 @@ def step_live(registry, planner: Planner) -> bool:
             f"причина: {meta['reason']}, raw: {meta['raw'][:80]!r}",
         )
         ok &= check(
-            "стоимость вызова plan_with_llm < 0.01 руб",
+            "стоимость вызова plan_with_llm < 0.02 руб",
             float(meta["cost_rub"]) < COST_LIMIT_RUB,
             f"{float(meta['cost_rub']):.5f} руб",
         )

@@ -91,6 +91,20 @@ gap_closer:
   compose_enabled: true     # разрешать LLM-композицию из умений
   ask_enabled: true         # разрешать уточняющие вопросы пользователю
 
+search:
+  enabled: true
+  max_results: 3
+  timeout_s: 15
+  fact_keywords: ["кто", "что", "когда", "где", "сколько", "почему",
+                  "как", "выиграл", "произошло", "стоит", "находится"]
+
+conversation:
+  enabled: true
+  window_s: 25              # окно диалога после ответа: продолжение без имени
+  end_phrases: ["спасибо", "всё", "пока", "отбой", "не надо", "хватит", "замолчи"]
+  greeting_phrases: ["привет", "здравствуй", "хай", "приветик", "добрый день",
+                     "добрый вечер"]
+
 budget:
   brain_monthly_rub: 3000
   voice_monthly_rub: 800

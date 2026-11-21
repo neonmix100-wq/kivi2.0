@@ -3,12 +3,16 @@
 Конечный автомат:
     IDLE -> (VAD speech_end) -> локальный Whisper -> is_wake?
       имя + команда   -> THINKING (one-shot)
-      только имя      -> сказать «Слушаю», открыть окно 8 с на команду без имени
-      нет имени       -> IDLE, молча
+      только имя      -> сказать «Слушаю», открыть окно диалога
+      нет имени       -> в окне диалога: команда без имени; иначе IDLE молча
     THINKING -> planner.plan(command)   # LLM-планировщик + difflib-фолбэк
-      умение найдено  -> loader.invoke -> SPEAKING (Router не зовём)
-      умения нет      -> «Пока не умею: X» + Router.chat о пробеле -> SPEAKING
-      пробел частый   -> gap_closer: реактивация | композиция | вопросы -> SPEAKING
+      route=skill       -> loader.invoke -> SPEAKING (Router не зовём)
+      route=search      -> search_web + summarize -> SPEAKING (одна реплика)
+      route=action_gap  -> пробел: GapCloser или короткий честный ответ
+      route=chat        -> Router.complete_stream + SentenceSpeaker
+    После любого ответа: окно диалога открыто ещё window_s секунд — продолжение
+    можно говорить без имени. Фразы «спасибо/пока/хватит…» закрывают окно.
+    Ровно один ответ на команду; второй ответ через chat запрещён.
 
 Никаких облачных вызовов для проверки имени: распознаёт локальный faster-whisper.
 Каждое распознанное высказывание пишется в data/logs/wake.log.
@@ -42,7 +46,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "COOLDOWN_S",
+    "DIALOG_WINDOW_S",
+    "END_PHRASES",
     "FOLLOWUP_WINDOW_S",
+    "GREETING_PHRASES",
     "MAX_UTTERANCE_S",
     "MIN_UTTERANCE_S",
     "WAKE_LOG",
@@ -55,8 +62,18 @@ WARMUP_SECONDS = 0.25
 MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 15.0
 COOLDOWN_S = 1.5
-FOLLOWUP_WINDOW_S = 8.0
+DIALOG_WINDOW_S = 25.0
+FOLLOWUP_WINDOW_S = DIALOG_WINDOW_S  # устаревшее имя, оставлено для совместимости
 ACK_PHRASE = "Слушаю"
+END_PHRASES = ("спасибо", "всё", "пока", "отбой", "не надо", "хватит", "замолчи")
+GREETING_PHRASES = (
+    "привет",
+    "здравствуй",
+    "хай",
+    "приветик",
+    "добрый день",
+    "добрый вечер",
+)
 
 Action = Literal["idle", "listen", "think", "followup", "cooldown"]
 State = Literal["IDLE", "THINKING", "SPEAKING"]
@@ -107,6 +124,46 @@ def _ensure_wake_log() -> None:
 wake_log = logger.bind(wake=True)
 
 
+def _normalize_phrase(text: str) -> str:
+    """Нижний регистр, ё->е, пунктуация -> пробелы (как в registry)."""
+    value = str(text or "").replace("ё", "е").replace("Ё", "Е").lower()
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in value)
+    return " ".join(cleaned.split())
+
+
+def _find_phrase(
+    text: str,
+    phrases: tuple[str, ...] | list[str],
+    *,
+    prefix: bool = False,
+) -> str | None:
+    """Вернуть первую найденную фразу из списка (или None)."""
+    words = _normalize_phrase(text).split()
+    if not words:
+        return None
+    joined = " ".join(words)
+    for phrase in phrases:
+        needle = _normalize_phrase(phrase)
+        if not needle:
+            continue
+        if " " in needle:
+            if f" {needle} " in f" {joined} ":
+                return str(phrase)
+        elif needle in words or (prefix and any(word.startswith(needle) for word in words)):
+            return str(phrase)
+    return None
+
+
+def _contains_phrase(
+    text: str,
+    phrases: tuple[str, ...] | list[str],
+    *,
+    prefix: bool = False,
+) -> bool:
+    """Есть ли фраза из списка в тексте (целыми словами; prefix — для приветствий)."""
+    return _find_phrase(text, phrases, prefix=prefix) is not None
+
+
 def _default_speak(text: str) -> None:
     """Озвучка через кэш (служебные фразы — бесплатно после первого раза)."""
     from kivi.tts.cache import speak_cached
@@ -129,7 +186,8 @@ class WakeLoop:
         think_fn: Callable[[str], str] | None = None,
         on_result: Callable[[WakeResult], None] | None = None,
         session: Session | None = None,
-        followup_window_s: float = FOLLOWUP_WINDOW_S,
+        window_s: float | None = None,
+        followup_window_s: float | None = None,
         cooldown_s: float = COOLDOWN_S,
     ) -> None:
         _ensure_wake_log()
@@ -145,13 +203,32 @@ class WakeLoop:
         self.think_fn = think_fn
         self.on_result = on_result
         self.session = session
-        self.followup_window_s = float(followup_window_s)
+        self.followup_window_s = float(followup_window_s) if followup_window_s else 0.0
         self.cooldown_s = float(cooldown_s)
+
+        # Окно диалога: после ответа продолжаем слушать без имени.
+        conversation = self.settings.section("conversation")
+        self.conversation_enabled = bool(conversation.get("enabled", True))
+        configured_window = conversation.get("window_s")
+        chosen_window = (
+            window_s
+            if window_s is not None
+            else (followup_window_s if followup_window_s is not None else configured_window)
+        )
+        try:
+            self.window_s = max(1.0, float(chosen_window if chosen_window else DIALOG_WINDOW_S))
+        except (TypeError, ValueError):
+            self.window_s = DIALOG_WINDOW_S
+        self.end_phrases = tuple(conversation.get("end_phrases") or END_PHRASES)
+        self.greeting_phrases = tuple(
+            conversation.get("greeting_phrases") or GREETING_PHRASES
+        )
 
         self.pre_roll_ms = float(audio.pre_roll_ms)
         self.state: State = "IDLE"
-        self.followup_deadline = 0.0
+        self.window_until = 0.0
         self.last_wake_ts = 0.0
+        self._speaking = False  # True пока Киви озвучивает ответ (защита от самослушания)
         self._stop = threading.Event()
         self._speaker: SentenceSpeaker | None = None  # активная озвучка ответа
 
@@ -178,6 +255,7 @@ class WakeLoop:
         self.planner: Planner | None = None
         self.gaps: GapLog | None = None
         self.gap_config = self.settings.section("gap_closer")
+        self.search_config = self.settings.section("search")
         try:
             from kivi.skills.gaps import get_gap_log
             from kivi.skills.planner import Planner as _Planner
@@ -196,7 +274,7 @@ class WakeLoop:
             "WakeLoop готов: вход [{}] {}, окно {:.0f} c, cooldown {:.1f} c, память: {}",
             devices.input_index,
             devices.input_name,
-            self.followup_window_s,
+            self.window_s,
             self.cooldown_s,
             "вкл" if self.memory_enabled else "выкл",
         )
@@ -277,7 +355,7 @@ class WakeLoop:
                 if finished is not None:
                     self._handle_utterance(finished)
 
-                self._expire_followup()
+                self._expire_window()
 
                 # Простой: если давно молчим и есть необработанные реплики — рефлексия.
                 idle_seconds = time.time() - self._last_activity_ts
@@ -296,10 +374,29 @@ class WakeLoop:
 
     # --- обработка ---
 
-    def _expire_followup(self) -> None:
-        if self.followup_deadline and time.monotonic() > self.followup_deadline:
-            self.followup_deadline = 0.0
-            wake_log.info("окно ожидания команды истекло — снова IDLE")
+    def _expire_window(self) -> None:
+        if self.window_until and time.monotonic() > self.window_until:
+            self.window_until = 0.0
+            wake_log.info("диалог: окно истекло — ожидание имени")
+
+    def _open_window(self) -> None:
+        """Открыть окно диалога: продолжение можно говорить без имени."""
+        if not self.conversation_enabled:
+            return
+        self.window_until = time.monotonic() + self.window_s
+        wake_log.info("диалог: окно открыто ({:.0f}с)", self.window_s)
+
+    def _close_window(self, reason: str = "") -> None:
+        if not self.window_until:
+            return
+        self.window_until = 0.0
+        wake_log.info("диалог: окно закрыто{}", f" {reason}" if reason else "")
+
+    def _is_greeting(self, text: str) -> bool:
+        return _contains_phrase(text, self.greeting_phrases, prefix=True)
+
+    def _is_end_phrase(self, text: str) -> bool:
+        return _contains_phrase(text, self.end_phrases)
 
     def _drain(self, max_blocks: int = 32) -> None:
         """Выбросить накопленное аудио, чтобы не разбирать старый звук."""
@@ -308,6 +405,11 @@ class WakeLoop:
                 return
 
     def _handle_utterance(self, utterance: Utterance) -> None:
+        # Защита от самослушания: пока Киви говорит, её же фразы не обрабатываем.
+        if self._speaking:
+            wake_log.info("пропуск: говорю сама")
+            return
+
         duration = float(utterance.speech_s)
         if duration < MIN_UTTERANCE_S or duration > MAX_UTTERANCE_S:
             wake_log.info(
@@ -324,12 +426,19 @@ class WakeLoop:
             wake_log.error("Whisper упал: {}: {}", type(exc).__name__, exc)
             return
         if not heard:
+            # Фильтры энергии и галлюцинаций живут в STT (MIN_RMS/is_hallucination)
+            # и применяются к каждой фразе — в окне диалога тоже.
             wake_log.info("пропуск: пустое распознавание ({:.2f} c)", duration)
             return
 
         match = detect(heard)
         now = time.monotonic()
-        in_followup = bool(self.followup_deadline) and now <= self.followup_deadline
+        in_window = (
+            self.conversation_enabled
+            and bool(self.window_until)
+            and now <= self.window_until
+        )
+        wake_log.info("диалог: режим {}", "диалог" if in_window else "ожидание имени")
 
         if match.is_wake:
             if now - self.last_wake_ts < self.cooldown_s:
@@ -340,33 +449,50 @@ class WakeLoop:
                 self._emit(result)
                 return
             self.last_wake_ts = now
-            if match.command:
-                action: Action = "think"
-                command = match.command
-            else:
-                action = "listen"
-                command = ""
-        elif in_followup:
-            # Окно открыто — фраза без имени считается командой.
+            command = match.command
+            action: Action = "think" if command else "listen"
+            if not command and self._is_greeting(heard):
+                # «Киви, привет»: детектор считает приветствие филлером —
+                # всё равно отвечаем естественно через chat.
+                command = _find_phrase(heard, self.greeting_phrases, prefix=True) or "привет"
+                action = "think"
+        elif in_window:
+            # Окно открыто — фраза без имени считается продолжением диалога.
             action = "followup"
             command = heard
         else:
             action = "idle"
             command = ""
 
+        # Фразы завершения: закрыть окно молча, без ответа.
+        if action in ("think", "followup") and self._is_end_phrase(command):
+            self._close_window("по фразе")
+            result = WakeResult(heard, match.is_wake, command, "idle", match.fuzzy, duration)
+            wake_log.info("{}", result)
+            self._emit(result)
+            return
+
         result = WakeResult(heard, match.is_wake, command, action, match.fuzzy, duration)
         wake_log.info("{}", result)
         self._emit(result)
 
         if action == "listen":
-            self.followup_deadline = time.monotonic() + self.followup_window_s
             self._say(ACK_PHRASE)
+            self._open_window()
             self._drain()
             self.vad.reset()
-            wake_log.info("окно ожидания команды: {:.0f} c", self.followup_window_s)
         elif action in ("think", "followup"):
-            self.followup_deadline = 0.0
-            self._think_and_speak(command)
+            # Старое окно больше не действует: новое откроется после ответа.
+            self.window_until = 0.0
+            if self._is_greeting(command):
+                wake_log.info("диалог: приветствие -> chat")
+                self._answer_chat(
+                    command,
+                    {"route": "chat", "source": "greeting"},
+                    time.perf_counter(),
+                )
+            else:
+                self._think_and_speak(command)
 
     def _emit(self, result: WakeResult) -> None:
         if self.on_result is not None:
@@ -376,45 +502,45 @@ class WakeLoop:
                 wake_log.error("колбэк on_result упал: {}", exc)
 
     def _think_and_speak(self, command: str) -> None:
-        """Стрим от LLM: предложения синтезируются и играются по мере поступления."""
+        """Ровно один ответ на команду: маршрут берём из planner.plan()."""
         started = time.perf_counter()
         session = self._get_session()
 
-        # --- умения: LLM-планировщик (+difflib-фолбэк), Router не зовём ---
         plan = self._plan_skill(command, session.history())
+        route = str((plan or {}).get("route") or "chat")
+
         if plan is not None and plan.get("skill") is not None:
             self._run_skill(command, plan["skill"], plan.get("args") or {})
             return
-
-        # --- пробел просят часто: реактивация -> композиция -> вопросы ---
-        gap_id = self._frequent_gap_id(plan)
-        if gap_id is not None:
-            self._close_gap(command, plan, gap_id)
+        if route == "search":
+            self._answer_search(command, plan, started)
             return
+        if route == "action_gap":
+            self._answer_action_gap(command, plan, started)
+            return
+        self._answer_chat(command, plan, started)
 
-        notice = self._missing_notice(plan)
-        if notice:
-            wake_log.info("THINKING: пробел в умениях — {!r}", notice)
-            self._say(notice)
-
+    def _answer_chat(self, command: str, plan: dict | None, started: float) -> None:
+        """Разговорный путь: один стрим Router -> SentenceSpeaker."""
+        session = self._get_session()
         memory = self._memory_block(command)
-        hint = self._gap_hint(plan)
-        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "") + hint
+        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
         messages = (
             [{"role": "system", "content": system_text}]
             + session.history()
             + [{"role": "user", "content": command}]
         )
         wake_log.info(
-            "THINKING: {!r} (в контексте {} реплик, память {} символов)",
+            "THINKING -> chat: {!r} (в контексте {} реплик, память {} символов)",
             command,
             len(messages) - 2,
             len(memory),
         )
         self.state = "THINKING"
 
-        speaker = SentenceSpeaker(started_at=started)
+        speaker = SentenceSpeaker(started_at=started, context="think")
         self._speaker = speaker
+        self._speaking = True
         parts: list[str] = []
         try:
             if self.think_fn is not None:
@@ -444,6 +570,7 @@ class WakeLoop:
             except Exception as exc:  # noqa: BLE001
                 wake_log.error("озвучка стрима упала: {}", exc)
             finally:
+                self._speaking = False
                 self._speaker = None
 
         full_text = "".join(parts).strip()
@@ -451,12 +578,117 @@ class WakeLoop:
             # В историю пишем очищенный ответ целиком (без лимита в 40 слов).
             session.add("user", command)
             session.add("assistant", to_speech(full_text, max_words=10000))
+            self._open_window()
 
         self._note_turn()
         self._drain()
         self.vad.reset()
         self.state = "IDLE"
         wake_log.info("вернулся в IDLE")
+
+    def _answer_search(self, command: str, plan: dict | None, started: float) -> None:
+        """Поиск в интернете + сводка: одна озвучка, без Router.chat вторым."""
+        from kivi.skills.search import search_web, summarize_with_llm
+
+        self.state = "THINKING"
+        wake_log.info("THINKING -> search: {!r}", command)
+        settings = self.search_config or {}
+        try:
+            max_results = int(settings.get("max_results") or 3)
+            timeout_s = float(settings.get("timeout_s") or 15.0)
+        except (TypeError, ValueError):
+            max_results, timeout_s = 3, 15.0
+
+        speaker = SentenceSpeaker(started_at=started, context="search")
+        self._speaker = speaker
+        text = ""
+        try:
+            results = search_web(command, max_results=max_results, timeout=timeout_s)
+            answer = (
+                summarize_with_llm(command, results, router=self.router)
+                if results
+                else ""
+            )
+            text = " ".join(str(answer).split())
+        except Exception as exc:  # noqa: BLE001 - поиск не должен ронять цикл
+            wake_log.error("поиск упал: {}: {}", type(exc).__name__, exc)
+            text = ""
+
+        if not text:
+            self._record_gap(command, plan, why="поиск не дал ответа")
+            text = "Не нашла свежих данных по этому вопросу."
+
+        try:
+            self.state = "SPEAKING"
+            self._speaking = True
+            speaker.feed(text)
+            speaker.finish()
+        except Exception as exc:  # noqa: BLE001
+            wake_log.error("озвучка поиска упала: {}", exc)
+        finally:
+            self._speaking = False
+            self._speaker = None
+
+        wake_log.info("поиск: ответ {!r}", text[:80])
+        self._complete_turn(command, text)
+
+    def _answer_action_gap(self, command: str, plan: dict | None, started: float) -> None:
+        """Действие без умения: попытка закрыть пробел или честный короткий ответ."""
+        self.state = "THINKING"
+        wake_log.info("THINKING -> action_gap: {!r}", command)
+
+        speaker = SentenceSpeaker(started_at=started, context="think")
+        self._speaker = speaker
+        text = ""
+        gap_id = self._frequent_gap_id(plan)
+        if gap_id is not None:
+            success, how, message = self._gap_message(gap_id)
+            wake_log.info("пробел {}: {} -> {}", gap_id, how, success)
+            text = " ".join(str(message).split())
+        if not text:
+            text = "Пока не могу это сделать, но запомнила, что тебе это нужно."
+
+        try:
+            self.state = "SPEAKING"
+            self._speaking = True
+            speaker.feed(text)
+            speaker.finish()
+        except Exception as exc:  # noqa: BLE001
+            wake_log.error("озвучка пробела упала: {}", exc)
+        finally:
+            self._speaking = False
+            self._speaker = None
+
+        self._complete_turn(command, text)
+
+    def _complete_turn(self, command: str, text: str) -> None:
+        """Записать реплики в сессию, открыть окно диалога и вернуть IDLE."""
+        if text:
+            session = self._get_session()
+            session.add("user", command)
+            session.add("assistant", text)
+            self._open_window()
+        self._note_turn()
+        self._drain()
+        self.vad.reset()
+        self.state = "IDLE"
+        wake_log.info("вернулся в IDLE")
+
+    def _record_gap(self, command: str, plan: dict | None, *, why: str) -> int | None:
+        """Записать пробел (для search-пути; action_gap пишет планировщик)."""
+        if self.gaps is None:
+            return None
+        missing = (plan or {}).get("missing") or []
+        capability = str(missing[0].get("capability") or "").strip() if missing else ""
+        try:
+            return self.gaps.record_gap(
+                command=command,
+                user_intent=capability or command,
+                why=why,
+            )
+        except Exception as exc:  # noqa: BLE001 - журнал не должен ронять ответ
+            wake_log.warning("пробелы: не удалось записать пробел: {}", exc)
+            return None
 
     # --- скиллы ---
 
@@ -479,45 +711,16 @@ class WakeLoop:
             )
         else:
             wake_log.info(
-                "планировщик: умения нет (источник {}), пробел записан",
+                "планировщик: маршрут {} (источник {}), пробел: {}",
+                plan.get("route") or "chat",
                 plan.get("source"),
+                "записан" if plan.get("gap_id") else "не нужен",
             )
         return plan
 
-    @staticmethod
-    def _missing_notice(plan: dict | None) -> str:
-        """Короткая фраза «Пока не умею: X» для озвучки (пусто, если умение есть)."""
-        if not plan or plan.get("skill") is not None:
-            return ""
-        missing = plan.get("missing") or []
-        if not missing:
-            return ""
-        capability = str(missing[0].get("capability") or "").strip()
-        if not capability:
-            return ""
-        if len(capability) > 60:
-            capability = capability[:57].rstrip() + "…"
-        return f"Пока не умею: {capability}."
-
-    @staticmethod
-    def _gap_hint(plan: dict | None) -> str:
-        """Подсказка модели: чего просит пользователь, а умения пока нет."""
-        if not plan or plan.get("skill") is not None:
-            return ""
-        missing = plan.get("missing") or []
-        if not missing:
-            return ""
-        capability = str(missing[0].get("capability") or "").strip()
-        if not capability:
-            return ""
-        return (
-            "\n\nУмения под эту просьбу пока нет: "
-            f"{capability[:120]}. Скажи честно и коротко, что пока не умеешь."
-        )
-
     def _frequent_gap_id(self, plan: dict | None) -> int | None:
         """id пробела, если эту просьбу повторяли достаточно часто (gap_closer)."""
-        if not plan or plan.get("skill") is not None or not plan.get("missing"):
+        if not plan or plan.get("route") != "action_gap":
             return None
         gap_id = plan.get("gap_id")
         if not gap_id or self.gaps is None:
@@ -534,50 +737,34 @@ class WakeLoop:
         ids = {int(row["id"]) for row in frequent}
         return int(gap_id) if int(gap_id) in ids else None
 
-    def _close_gap(self, command: str, plan: dict | None, gap_id: int) -> None:
-        """Пробел повторяется: реактивируем умение, собираем композицию или спрашиваем."""
+    def _gap_message(self, gap_id: int) -> tuple[bool, str, str]:
+        """Закрыть пробел: (успех, стратегия, текст для озвучки). Ровно один ответ."""
         from kivi.skills.gap_closer import GapCloser
 
         started = time.perf_counter()
-        self.state = "THINKING"
-        wake_log.info("THINKING -> закрытие пробела {}: {!r}", gap_id, command)
+        wake_log.info("THINKING -> закрытие пробела {}: {!r}", gap_id, "action_gap")
         try:
             closer = GapCloser(
                 router=self.router,
                 registry=self.skills,
                 gaps=self.gaps,
                 config=self.gap_config,
+                search_config=self.search_config,
             )
             success, how, message = closer.attempt_close(gap_id)
+            if success and how == "search":
+                wake_log.info("пробел {}: ответ найден в интернете", gap_id)
         except Exception as exc:  # noqa: BLE001 - пробел не должен ронять цикл
             wake_log.error(
                 "пробел {}: закрытие упало: {}: {}", gap_id, type(exc).__name__, exc
             )
             success, how, message = False, "none", ""
-
-        text = " ".join(str(message).split())
-        if not text:
-            text = self._missing_notice(plan)
         wake_log.info(
-            "пробел {}: {} -> {} ({})",
+            "пробел {}: {:.0f} мс",
             gap_id,
-            how,
-            success,
-            "озвучиваю" if text else "молчу",
+            (time.perf_counter() - started) * 1000.0,
         )
-        if text:
-            self._say(text)
-            session = self._get_session()
-            session.add("user", command)
-            session.add("assistant", text)
-
-        self._note_turn()
-        self._drain()
-        self.vad.reset()
-        self.state = "IDLE"
-        wake_log.info(
-            "пробел {}: {:.0f} мс", gap_id, (time.perf_counter() - started) * 1000.0
-        )
+        return success, how, " ".join(str(message).split())
 
     def _run_skill(self, command: str, manifest: SkillManifest, args: dict) -> None:
         """Выполнить скилл: озвучить ответ и записать реплики. Router не зовём."""
@@ -600,6 +787,7 @@ class WakeLoop:
             session = self._get_session()
             session.add("user", command)
             session.add("assistant", text)
+            self._open_window()
         else:
             wake_log.warning("скилл {} вернул пустой ответ", manifest.name)
 
@@ -701,9 +889,11 @@ class WakeLoop:
         if not phrase:
             return
         self.state = "SPEAKING"
+        self._speaking = True
         try:
             self.speak_fn(phrase)
         except Exception as exc:  # noqa: BLE001 - TTS может упасть
             wake_log.error("озвучка упала: {}: {}", type(exc).__name__, exc)
         finally:
+            self._speaking = False
             self.state = "IDLE"

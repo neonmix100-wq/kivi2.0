@@ -37,9 +37,11 @@ from kivi.skills.gap_closer import (
     GapCloser,
     GapCloserConfig,
     ReactivateStrategy,
+    SearchStrategy,
 )
 from kivi.skills.gaps import GapLog
 from kivi.skills.registry import SkillRegistry
+from kivi.skills.search import SearchConfig
 
 TMP = PROJECT_ROOT / "data" / "tmp"
 PROBE_ROOT = TMP / "gap_closer_smoke"
@@ -112,6 +114,43 @@ class ScriptedRouter:
         self.calls.append({"task_type": task_type, "messages": messages})
         text = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         return {"text": text, "cost_rub": 0.0, "model": "scripted", "ok": True}
+
+
+class FakeSearcher:
+    """Заглушка search_web: отдаёт заданные результаты, помнит запросы."""
+
+    def __init__(self, results: list[dict[str, str]] | None = None) -> None:
+        self.results = list(results or [])
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        query: str,
+        max_results: int = 3,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, str]]:
+        self.calls.append({"query": query, "max_results": max_results, "timeout": timeout})
+        return list(self.results)
+
+
+class FakeSummarizer:
+    """Заглушка summarize_with_llm: фиксированный ответ, помнит вызовы."""
+
+    def __init__(self, answer: str = "Матч выиграла «Заря» со счётом 2:1.") -> None:
+        self.answer = answer
+        self.calls: list[str] = []
+
+    def __call__(
+        self,
+        query: str,
+        results: list[dict[str, Any]],
+        *,
+        router: Any = None,
+        **kwargs: Any,
+    ) -> str:
+        self.calls.append(query)
+        return self.answer
 
 
 def prepare_skill() -> None:
@@ -234,6 +273,7 @@ def main() -> int:
         registry=registry,
         gaps=gaps,
         config=GapCloserConfig(min_frequency=3, reactivate_threshold=0.7),
+        search_config={"enabled": False},
     )
     success, how, message = closer.attempt_close(gap_id)
     print(f"    -> {success}, {how}, {message!r}")
@@ -257,6 +297,7 @@ def main() -> int:
         registry=registry,
         gaps=gaps,
         config=GapCloserConfig(min_frequency=3),
+        search_config={"enabled": False},
     )
     success, how, message = closer.attempt_close(compose_gap)
     print(f"    -> {success}, {how}, {message!r}")
@@ -274,6 +315,7 @@ def main() -> int:
         registry=registry,
         gaps=gaps,
         config=GapCloserConfig(min_frequency=3, compose_enabled=False, ask_enabled=True),
+        search_config={"enabled": False},
     )
     success, how, message = closer.attempt_close(ask_gap)
     print(f"    -> {success}, {how}, {message!r}")
@@ -292,7 +334,106 @@ def main() -> int:
         closer.attempt_close(999999)[1] == "none",
     )
 
-    print("\n--- 8) схема capability_gaps ---")
+    print("\n--- 8) SearchStrategy: факты из интернета ---")
+    fact_results = [
+        {
+            "title": "Заря победила в матче",
+            "url": "https://example.com/news",
+            "snippet": "Матч завершился со счётом 2:1.",
+        }
+    ]
+    search_gap = add_gap(gaps, "кто выиграл матч вчера", "результат матча", times=3)
+    searcher = FakeSearcher(fact_results)
+    summarizer = FakeSummarizer("Матч выиграла «Заря» со счётом 2:1.")
+    search_strategy = SearchStrategy(
+        router=ScriptedRouter([COMPOSE_REPLY]),
+        config=SearchConfig(enabled=True, max_results=3, timeout_s=15),
+        searcher=searcher,
+        summarizer=summarizer,
+    )
+    success, how, message = search_strategy.attempt(gaps.get(search_gap))
+    print(f"    -> {success}, {how}, {message!r}")
+    ok &= check("фактический пробел найден в интернете", success and how == "search")
+    ok &= check("в сообщении «Нашла в интернете»", "Нашла в интернете" in message)
+    ok &= check(
+        "поиск вызван с командой пробела",
+        bool(searcher.calls) and searcher.calls[0]["query"] == "кто выиграл матч вчера",
+    )
+    ok &= check("сводка LLM вызвана", summarizer.calls == ["кто выиграл матч вчера"])
+
+    print("\n--- 8b) порядок стратегий reactivate -> search -> compose -> ask ---")
+    order_search_router = ScriptedRouter([COMPOSE_REPLY])
+    order_searcher = FakeSearcher(fact_results)
+    order_closer = GapCloser(
+        router=order_search_router,
+        registry=registry,
+        gaps=gaps,
+        config=GapCloserConfig(min_frequency=3),
+        search_config={"enabled": True, "max_results": 3, "timeout_s": 15},
+        searcher=order_searcher,
+        summarizer=FakeSummarizer("Ответ из интернета."),
+    )
+    names_order = [item.name for item in order_closer.strategies]
+    print(f"    стратегии: {' -> '.join(names_order)}")
+    ok &= check(
+        "порядок reactivate -> search -> compose -> ask",
+        names_order == ["reactivate", "search", "compose", "ask"],
+    )
+    success, how, message = order_closer.attempt_close(search_gap)
+    print(f"    -> {success}, {how}, {message!r}")
+    ok &= check("закрыто поиском до композиции", success and how == "search")
+    ok &= check("compose не вызывался (search раньше)", order_search_router.calls == [])
+    ok &= check(
+        "closed_how=search",
+        (gaps.get(search_gap) or {}).get("closed_how") == "search",
+    )
+
+    print("\n--- 8c) пустой поиск -> compose ---")
+    empty_search_gap = add_gap(gaps, "кто выиграл матч вчера", "результат матча", times=3)
+    empty_searcher = FakeSearcher([])
+    empty_compose_router = ScriptedRouter([COMPOSE_REPLY])
+    empty_closer = GapCloser(
+        router=empty_compose_router,
+        registry=registry,
+        gaps=gaps,
+        config=GapCloserConfig(min_frequency=3),
+        search_config={"enabled": True},
+        searcher=empty_searcher,
+        summarizer=FakeSummarizer("не должно использоваться"),
+    )
+    success, how, message = empty_closer.attempt_close(empty_search_gap)
+    print(f"    -> {success}, {how}, {message!r}")
+    ok &= check("пустой поиск -> compose", success and how == "compose", how)
+    ok &= check("поиск вызывался один раз", len(empty_searcher.calls) == 1)
+    ok &= check(
+        "compose-роутер получил intent",
+        [call["task_type"] for call in empty_compose_router.calls] == ["intent"],
+    )
+
+    print("\n--- 8d) не фактическая команда -> поиск пропущен ---")
+    not_fact_gap = add_gap(gaps, "поставь напоминание", "напоминания", times=3)
+    skip_searcher = FakeSearcher(fact_results)
+    skip_strategy = SearchStrategy(
+        router=None,
+        config=SearchConfig(enabled=True),
+        searcher=skip_searcher,
+        summarizer=FakeSummarizer(),
+    )
+    success, how, message = skip_strategy.attempt(gaps.get(not_fact_gap))
+    print(f"    -> {success}, {how}, {message!r}")
+    ok &= check("search не вызывался", skip_searcher.calls == [])
+    ok &= check("search вернул False", success is False and how == "search")
+
+    disabled_strategy = SearchStrategy(
+        router=None,
+        config=SearchConfig(enabled=False),
+        searcher=skip_searcher,
+        summarizer=FakeSummarizer(),
+    )
+    success, how, message = disabled_strategy.attempt(gaps.get(search_gap))
+    ok &= check("search.enabled=false -> пропуск", success is False and how == "search")
+
+    print("\n--- 9) схема capability_gaps ---")
     with closing(sqlite3.connect(str(GAPS_DB))) as connection:
         columns = {
             str(row[1]) for row in connection.execute("PRAGMA table_info(capability_gaps)")

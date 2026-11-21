@@ -26,16 +26,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import kivi.tts.stream as stream_mod
 from kivi.log import setup_logging
-from kivi.tts.cache import synthesize_cached
+from kivi.tts import fillers
 from kivi.tts.stream import (
-    ACK_PHRASES,
     FIRST_CHUNK_MAX,
     FIRST_CHUNK_MIN,
     MAX_CHUNK_CHARS,
     TARGET_CHUNK_CHARS,
     SentenceSpeaker,
-    last_ack_phrase,
-    pick_ack_phrase,
 )
 
 TEXT = (
@@ -98,11 +95,16 @@ def main() -> int:
 
     ok: list[bool] = []
 
-    # Кэш вводных: один раз синтезируем, дальше бесплатно.
-    warm: dict[str, Path] = {}
-    for phrase in ACK_PHRASES:
-        warm[phrase] = synthesize_cached(phrase)
-    sample = warm[ACK_PHRASES[0]]
+    # Библиотека вводных: один раз генерируем и синтезируем, дальше бесплатно.
+    library = fillers.ensure_library("think")
+    print(f"вводных в библиотеке: {len(library)} — {library}")
+    if len(library) < 2:
+        print("FAIL — библиотека вводных пуста (нужен TTS и LLM)")
+        return 1
+    sample = fillers.audio_path("think", library[0])
+    if sample is None:
+        print("FAIL — нет mp3 для первой вводной")
+        return 1
     print(f"образец для заглушки: {sample.name} ({sample.stat().st_size} байт)")
 
     check_chunking(ok)
@@ -146,34 +148,40 @@ def main() -> int:
 
     # --- сценарий C: 12 вводных подряд, каждая реально звучит ---
     print("\n[4] 12 вводных подряд — слушаем; повторов быть не должно")
-    player = SentenceSpeaker(started_at=time.perf_counter(), ack_delay_s=600.0)
+    player = SentenceSpeaker(
+        started_at=time.perf_counter(), ack_delay_s=600.0, context="think"
+    )
     played: list[str] = []
     for index in range(1, 13):
         phrase = player.play_ack()
         played.append(phrase or "")
         print(
             f"    {index:2d}. сыграно: {phrase!r} (id={player.run_id}, "
-            f"last={last_ack_phrase()!r})",
+            f"last={fillers.last_phrase('think')!r})",
             flush=True,
         )
     player.stop()
     print(f"    всего звучало {player.played_seconds:.2f} с")
     ok.append(all(played))
     ok.append(all(a != b for a, b in zip(played, played[1:])))
-    ok.append(set(played) == set(ACK_PHRASES))
+    ok.append(all(phrase.rstrip().endswith((".", "!")) for phrase in played))
     # выбор всегда отличается от последней СЫГРАННОЙ фразы
-    ok.append(all(pick_ack_phrase() != last_ack_phrase() for _ in range(20)))
+    ok.append(
+        all(fillers.pick("think") != fillers.last_phrase("think") for _ in range(20))
+    )
 
-    # --- сценарий D: одна фраза в списке — играем молча ---
-    print("\n[5] в списке одна вводная — молчим (никаких повторов)")
-    saved = stream_mod.ACK_PHRASES
-    stream_mod.ACK_PHRASES = (ACK_PHRASES[0],)
+    # --- сценарий D: пустая библиотека — играем молча ---
+    print("\n[5] пустая библиотека — молчим (никаких повторов)")
+    saved_pick = fillers.pick
+    fillers.pick = lambda context="think": None  # type: ignore[assignment]
     single: SentenceSpeaker | None = None
     try:
-        single = SentenceSpeaker(started_at=time.perf_counter(), ack_delay_s=600.0)
+        single = SentenceSpeaker(
+            started_at=time.perf_counter(), ack_delay_s=600.0, context="think"
+        )
         result = single.play_ack()
     finally:
-        stream_mod.ACK_PHRASES = saved
+        fillers.pick = saved_pick  # type: ignore[assignment]
     if single is not None:
         single.stop()
     print(f"    play_ack() -> {result!r}, звука {single.played_seconds if single else 0:.2f} с")

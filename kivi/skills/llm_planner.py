@@ -1,17 +1,23 @@
-"""LLM-планировщик умений: команда -> (skill_name | None, args, missing).
+"""LLM-планировщик умений: команда -> (skill_name | None, args, missing) + route.
 
 Работает через Router.complete(task_type="intent"): тир cheap, без эскалации
 (оркестратор защищён от переходов). Каталог умений собирается из registry
 и вставляется в системный промпт.
 
-Ответ модели — строго JSON. Если JSON невалиден или модель выдумала имя
-скилла, возвращаем (None, {}, []) и пишем причину в last_call():
-planner.py по этой пометке уходит в старый difflib-матчинг.
+Ответ модели — строго JSON с полем route:
+  skill      — каталог покрывает команду (skill_name обязателен);
+  chat       — генеративный/разговорный запрос (анекдот, объяснение, перевод):
+               пробел НЕ записывается, missing пустой;
+  search     — нужны живые внешние данные (курс, погода, новости, факты);
+  action_gap — нужно действие над миром, а инструмента в каталоге нет.
+
+Если JSON невалиден или модель выдумала имя скилла, возвращаем (None, {}, [])
+и пишем причину в last_call(): planner.py уходит в difflib-фолбэк.
 
 Использование:
     from kivi.skills.llm_planner import plan_with_llm, last_call
     skill_name, args, missing = plan_with_llm("который час")
-    last_call()   # {"ok": True, "cost_rub": 0.0021, "model": ..., ...}
+    last_call()   # {"ok": True, "route": "skill", "cost_rub": ..., ...}
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from kivi.skills.registry import SkillManifest, SkillRegistry, get_registry
 
 __all__ = [
     "DEFAULT_CATALOG_TOKENS",
+    "ROUTES",
     "SYSTEM_PROMPT",
     "build_catalog",
     "last_call",
@@ -36,22 +43,26 @@ __all__ = [
 DEFAULT_CATALOG_TOKENS = 600
 MAX_CATALOG_SKILLS = 30
 CHARS_PER_TOKEN = 3  # грубая оценка для русского текста (как в Session)
+ROUTES = ("skill", "search", "chat", "action_gap")
 
-SYSTEM_PROMPT = """Ты — планировщик умений ассистента Киви. Получаешь команду \
-пользователя и каталог её умений. Решаешь, какое умение подходит.
-Отвечай СТРОГО JSON без markdown:
-{
-  "skill_name": "имя_умения" | null,
-  "args": {параметры},
-  "missing": [{"capability": "что не хватает", "why": "почему"}]
-}
-Если подходящего умения нет — skill_name=null, capability=намерение \
-пользователя (не дословная команда). Не придумывай умения, которых нет в каталоге."""
+SYSTEM_PROMPT = """Ты — планировщик умений Киви. По команде и каталогу выбери маршрут.
+Ответ — СТРОГО JSON без markdown:
+{"skill_name": "имя" | null, "args": {}, "route": "skill|search|chat|action_gap",
+ "missing": [{"capability": "...", "why": "..."}]}
+Правила:
+- skill — каталог покрывает команду (skill_name обязателен, missing=[]);
+- chat — разговор/генерация: анекдот, история, объяснение, перевод, совет (missing=[]);
+- search — живые данные: курс, погода, новости, цены, результаты, факты \
+кто/что/когда/сколько (missing=[]);
+- action_gap — действие над миром без инструмента: устройство, письмо, файл, \
+покупка (capability=намерение).
+Умения вне каталога не выдумывай."""
 
-# Последний вызов: причина fallback, стоимость, модель. Нужен planner.py и смоукам.
+# Последний вызов: причина fallback, маршрут, стоимость, модель. Нужен planner.py и смоукам.
 _LAST_CALL: dict[str, Any] = {
     "ok": False,
     "reason": "not_called",
+    "route": None,
     "skill_name": None,
     "skill_attempted": None,
     "cost_rub": 0.0,
@@ -179,6 +190,21 @@ def _extract_json(text: str) -> Any | None:
     return None
 
 
+def _derive_route(
+    route_raw: Any, skill_name: str | None, missing: list[dict[str, str]]
+) -> str:
+    """Валидный маршрут: skill побеждает; неизвестный route -> chat/action_gap."""
+    if skill_name is not None:
+        return "skill"
+    route = str(route_raw).strip().lower() if isinstance(route_raw, str) else ""
+    if route in ("chat", "search", "action_gap"):
+        return route
+    if route == "skill":
+        # route=skill без валидного имени бессмыслен: действие или разговор.
+        return "action_gap" if missing else "chat"
+    return "action_gap" if missing else "chat"
+
+
 def _validate(
     payload: Any, registry: SkillRegistry
 ) -> tuple[dict[str, Any] | None, str]:
@@ -226,7 +252,17 @@ def _validate(
         if manifest is None or not manifest.enabled:
             return None, "unknown_skill"
 
-    return {"skill_name": skill_name, "args": args, "missing": missing}, "ok"
+    route = _derive_route(payload.get("route"), skill_name, missing)
+    if route in ("chat", "search"):
+        # Разговор и поиск закрываются другими путями — пробел не нужен.
+        missing = []
+
+    return {
+        "skill_name": skill_name,
+        "args": args,
+        "missing": missing,
+        "route": route,
+    }, "ok"
 
 
 def parse_response(
@@ -270,7 +306,7 @@ def plan_with_llm(
     """
     text = str(command or "").strip()
     if not text:
-        _remember(ok=False, reason="empty_command", raw="")
+        _remember(ok=False, reason="empty_command", raw="", route=None)
         return None, {}, []
 
     active = registry if registry is not None else get_registry()
@@ -299,6 +335,7 @@ def plan_with_llm(
             cost_rub=0.0,
             ms=round(elapsed, 1),
             raw="",
+            route=None,
         )
         logger.warning(
             "планировщик: LLM недоступна ({}: {}) — fallback на difflib",
@@ -331,6 +368,7 @@ def plan_with_llm(
             model=model,
             ms=round(elapsed, 1),
             raw=raw[:300],
+            route=None,
         )
         if reason == "unknown_skill":
             logger.warning(
@@ -348,6 +386,7 @@ def plan_with_llm(
     _remember(
         ok=True,
         reason="ok",
+        route=parsed["route"],
         skill_name=parsed["skill_name"],
         skill_attempted=None,
         cost_rub=cost,
@@ -356,9 +395,10 @@ def plan_with_llm(
         raw=raw[:300],
     )
     logger.info(
-        "планировщик: {!r} -> {} (уверенно по каталогу, {:.0f} мс, {:.4f} руб)",
+        "планировщик: {!r} -> {} (route {}, {:.0f} мс, {:.4f} руб)",
         text[:60],
         parsed["skill_name"] or "нет умения",
+        parsed["route"],
         elapsed,
         cost,
     )
