@@ -12,8 +12,9 @@
     gaps = get_gap_log()
     gap_id = gaps.record_gap("расскажи анекдот", user_intent="анекдоты",
                              why="нет скилла с шутками")
+    gaps.get_frequent_gaps(min_count=3)     # что просили >= 3 раз (для закрытия)
     gaps.stats_by_intent()                  # топ-10 по частоте запросов
-    gaps.close(gap_id, how="skill: jokes")  # умение появилось — закрыть
+    gaps.close(gap_id, how="reactivate", notes="включила умение jokes")
 """
 
 from __future__ import annotations
@@ -47,12 +48,28 @@ CREATE TABLE IF NOT EXISTS capability_gaps (
     why               TEXT    NOT NULL DEFAULT '', -- короткое объяснение
     attempts_to_close INTEGER NOT NULL DEFAULT 1,  -- сколько раз просили
     closed_at         REAL,                        -- когда умение появилось
-    closed_how        TEXT,                        -- чем закрыли (skill: ...)
+    closed_how        TEXT,                        -- чем закрыли (reactivate|compose|ask|none)
     notes             TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gaps_ts ON capability_gaps(ts);
 CREATE INDEX IF NOT EXISTS idx_gaps_intent ON capability_gaps(user_intent);
 """
+
+# Старые БД (до шага 1.7) могли не знать про закрытие: досоздаём колонки.
+GAP_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("skill_attempted", "TEXT"),
+    ("why", "TEXT NOT NULL DEFAULT ''"),
+    ("attempts_to_close", "INTEGER NOT NULL DEFAULT 1"),
+    ("closed_at", "REAL"),
+    ("closed_how", "TEXT"),
+    ("notes", "TEXT NOT NULL DEFAULT ''"),
+)
+
+GAP_SELECT = (
+    "SELECT id, ts, command, user_intent, skill_attempted, why, "
+    "attempts_to_close, closed_at, closed_how, notes "
+    "FROM capability_gaps"
+)
 
 
 class GapLog:
@@ -73,6 +90,16 @@ class GapLog:
     def _ensure_schema(self) -> None:
         with closing(self._connect()) as connection, connection:
             connection.executescript(SCHEMA)
+            existing = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(capability_gaps)")
+            }
+            for column, ddl in GAP_COLUMN_MIGRATIONS:
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE capability_gaps ADD COLUMN {column} {ddl}"
+                    )
+                    logger.info("пробелы: в capability_gaps добавлена колонка {}", column)
 
     # --- запись ---
 
@@ -173,13 +200,47 @@ class GapLog:
 
     # --- закрытие ---
 
-    def close(self, gap_id: int, how: str = "") -> bool:
-        """Отметить пробел закрытым (появилось умение). True — если запись была."""
+    def get_frequent_gaps(
+        self,
+        min_count: int = 3,
+        limit: int = 10,
+        *,
+        include_closed: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Пробелы, которые просили не меньше min_count раз (для закрытия).
+
+        По умолчанию закрытые не возвращаются: иначе Киви спрашивала бы
+        одно и то же каждый раз. Самые частые — первыми.
+        """
+        threshold = max(1, int(min_count))
+        query = GAP_SELECT + " WHERE attempts_to_close >= ?"
+        if not include_closed:
+            query += " AND closed_at IS NULL"
+        query += " ORDER BY attempts_to_close DESC, ts DESC, id DESC LIMIT ?"
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                query, (threshold, max(1, int(limit)))
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close(self, gap_id: int, how: str = "", notes: str = "") -> bool:
+        """Отметить пробел закрытым. how: reactivate|compose|ask|none.
+
+        notes — что именно сделали (или какие вопросы задали).
+        True — если запись была и была открыта.
+        """
+        comment = " ".join(str(notes or "").split())
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
-                "UPDATE capability_gaps SET closed_at = ?, closed_how = ? "
+                "UPDATE capability_gaps SET closed_at = ?, closed_how = ?, "
+                "notes = COALESCE(NULLIF(?, ''), notes) "
                 "WHERE id = ? AND closed_at IS NULL",
-                (time.time(), " ".join(str(how or "").split()), int(gap_id)),
+                (
+                    time.time(),
+                    " ".join(str(how or "").split()),
+                    comment,
+                    int(gap_id),
+                ),
             )
             closed = cursor.rowcount > 0
         if closed:

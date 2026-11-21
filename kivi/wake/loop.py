@@ -8,6 +8,7 @@
     THINKING -> planner.plan(command)   # LLM-планировщик + difflib-фолбэк
       умение найдено  -> loader.invoke -> SPEAKING (Router не зовём)
       умения нет      -> «Пока не умею: X» + Router.chat о пробеле -> SPEAKING
+      пробел частый   -> gap_closer: реактивация | композиция | вопросы -> SPEAKING
 
 Никаких облачных вызовов для проверки имени: распознаёт локальный faster-whisper.
 Каждое распознанное высказывание пишется в data/logs/wake.log.
@@ -35,6 +36,7 @@ from kivi.tts.stream import SentenceSpeaker
 from kivi.wake.detector import detect
 
 if TYPE_CHECKING:
+    from kivi.skills.gaps import GapLog
     from kivi.skills.planner import Planner
     from kivi.skills.registry import SkillManifest, SkillRegistry
 
@@ -174,15 +176,19 @@ class WakeLoop:
         # Битые манифесты просто пропускаются, и команда уходит в Router как раньше.
         self.skills: SkillRegistry | None = None
         self.planner: Planner | None = None
+        self.gaps: GapLog | None = None
+        self.gap_config = self.settings.section("gap_closer")
         try:
+            from kivi.skills.gaps import get_gap_log
             from kivi.skills.planner import Planner as _Planner
             from kivi.skills.registry import SkillRegistry as _SkillRegistry
 
             registry = _SkillRegistry.from_config(self.settings.section("skills"))
             registry.scan()
             self.skills = registry
+            self.gaps = get_gap_log()
             # Тот же router: в dry-run смоуке планировщик ничего не потратит.
-            self.planner = _Planner(registry, router=router)
+            self.planner = _Planner(registry, router=router, gaps=self.gaps)
         except Exception as exc:  # noqa: BLE001 - скиллы не должны блокировать запуск
             logger.warning("Скиллы: недоступны: {}: {}", type(exc).__name__, exc)
 
@@ -380,6 +386,12 @@ class WakeLoop:
             self._run_skill(command, plan["skill"], plan.get("args") or {})
             return
 
+        # --- пробел просят часто: реактивация -> композиция -> вопросы ---
+        gap_id = self._frequent_gap_id(plan)
+        if gap_id is not None:
+            self._close_gap(command, plan, gap_id)
+            return
+
         notice = self._missing_notice(plan)
         if notice:
             wake_log.info("THINKING: пробел в умениях — {!r}", notice)
@@ -501,6 +513,70 @@ class WakeLoop:
         return (
             "\n\nУмения под эту просьбу пока нет: "
             f"{capability[:120]}. Скажи честно и коротко, что пока не умеешь."
+        )
+
+    def _frequent_gap_id(self, plan: dict | None) -> int | None:
+        """id пробела, если эту просьбу повторяли достаточно часто (gap_closer)."""
+        if not plan or plan.get("skill") is not None or not plan.get("missing"):
+            return None
+        gap_id = plan.get("gap_id")
+        if not gap_id or self.gaps is None:
+            return None
+        try:
+            threshold = int(self.gap_config.get("min_frequency") or 3)
+        except (TypeError, ValueError):
+            threshold = 3
+        try:
+            frequent = self.gaps.get_frequent_gaps(min_count=threshold)
+        except Exception as exc:  # noqa: BLE001 - журнал не должен ронять цикл
+            wake_log.warning("пробелы: не удалось прочитать частые пробелы: {}", exc)
+            return None
+        ids = {int(row["id"]) for row in frequent}
+        return int(gap_id) if int(gap_id) in ids else None
+
+    def _close_gap(self, command: str, plan: dict | None, gap_id: int) -> None:
+        """Пробел повторяется: реактивируем умение, собираем композицию или спрашиваем."""
+        from kivi.skills.gap_closer import GapCloser
+
+        started = time.perf_counter()
+        self.state = "THINKING"
+        wake_log.info("THINKING -> закрытие пробела {}: {!r}", gap_id, command)
+        try:
+            closer = GapCloser(
+                router=self.router,
+                registry=self.skills,
+                gaps=self.gaps,
+                config=self.gap_config,
+            )
+            success, how, message = closer.attempt_close(gap_id)
+        except Exception as exc:  # noqa: BLE001 - пробел не должен ронять цикл
+            wake_log.error(
+                "пробел {}: закрытие упало: {}: {}", gap_id, type(exc).__name__, exc
+            )
+            success, how, message = False, "none", ""
+
+        text = " ".join(str(message).split())
+        if not text:
+            text = self._missing_notice(plan)
+        wake_log.info(
+            "пробел {}: {} -> {} ({})",
+            gap_id,
+            how,
+            success,
+            "озвучиваю" if text else "молчу",
+        )
+        if text:
+            self._say(text)
+            session = self._get_session()
+            session.add("user", command)
+            session.add("assistant", text)
+
+        self._note_turn()
+        self._drain()
+        self.vad.reset()
+        self.state = "IDLE"
+        wake_log.info(
+            "пробел {}: {:.0f} мс", gap_id, (time.perf_counter() - started) * 1000.0
         )
 
     def _run_skill(self, command: str, manifest: SkillManifest, args: dict) -> None:

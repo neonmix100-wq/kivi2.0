@@ -6,6 +6,14 @@
 """
 
 from kivi.skills.broker import PermissionDenied, SkillContext
+from kivi.skills.gap_closer import (
+    AskUserStrategy,
+    ComposeStrategy,
+    GapCloser,
+    GapCloserConfig,
+    ReactivateStrategy,
+    load_gap_config,
+)
 from kivi.skills.gaps import GapLog, get_gap_log
 from kivi.skills.llm_planner import build_catalog, parse_response, plan_with_llm
 from kivi.skills.loader import SkillLoadError, invoke, load
@@ -29,9 +37,14 @@ from kivi.skills.registry import (
 __all__ = [
     "DEFAULT_MIN_SCORE",
     "STRATEGIES",
+    "AskUserStrategy",
+    "ComposeStrategy",
+    "GapCloser",
+    "GapCloserConfig",
     "GapLog",
     "PermissionDenied",
     "Planner",
+    "ReactivateStrategy",
     "SkillContext",
     "SkillLoadError",
     "SkillManifest",
@@ -46,6 +59,7 @@ __all__ = [
     "get_top_gaps",
     "invoke",
     "load",
+    "load_gap_config",
     "load_skills_config",
     "parse_response",
     "plan_with_llm",

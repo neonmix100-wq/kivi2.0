@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS skills_stats (
 );
 """
 
+# Ручное включение/выключение скилла (например, после реактивации пробела).
+# Живёт в data/skills.db рядом со статистикой.
+FLAGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS skill_flags (
+    name       TEXT PRIMARY KEY,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_ts REAL
+);
+"""
+
 
 # --- модели манифеста ---
 
@@ -289,6 +299,7 @@ class SkillRegistry:
     def scan(self) -> list[SkillManifest]:
         """Перечитать папки со скиллами. Битые манифесты — WARNING и пропуск."""
         found: dict[str, SkillManifest] = {}
+        flags = self._enabled_flags()
         for directory in (self.skills_dir, self.installed_dir):
             if not directory.is_dir():
                 logger.debug("скиллы: папки {} нет — пропускаю", directory)
@@ -314,6 +325,11 @@ class SkillRegistry:
                         entry.name,
                     )
                     continue
+                if manifest.name in flags:
+                    # Ручной флаг из skills.db перекрывает enabled из манифеста.
+                    manifest = manifest.model_copy(
+                        update={"enabled": bool(flags[manifest.name])}
+                    )
                 found[manifest.name] = manifest
 
         self._skills = found
@@ -354,6 +370,47 @@ class SkillRegistry:
             self._skills[name] for name in sorted(self._skills) if self._skills[name].enabled
         ]
 
+    def list_all(self) -> list[SkillManifest]:
+        """Все скиллы, включая выключенные (для реактивации пробелов)."""
+        self._ensure_scanned()
+        return [self._skills[name] for name in sorted(self._skills)]
+
+    # --- включение/выключение ---
+
+    def _enabled_flags(self) -> dict[str, bool]:
+        """Флаги включения из skills.db (перекрывают enabled манифеста)."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute("SELECT name, enabled FROM skill_flags").fetchall()
+        return {str(row["name"]): bool(row["enabled"]) for row in rows}
+
+    def enable(self, name: str) -> bool:
+        """Включить скилл: флаг в skills.db + сброс серии ошибок подряд.
+
+        Нужно для закрытия пробелов: скилл мог быть отключён автовыходом
+        после auto_disable_after_fails ошибок. True — если скилл существует.
+        """
+        manifest = self.get(str(name))
+        if manifest is None:
+            logger.warning("скиллы: включить {!r} нельзя — такого скилла нет", name)
+            return False
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(
+                    "INSERT INTO skill_flags (name, enabled, updated_ts) VALUES (?, 1, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET enabled = 1, "
+                    "updated_ts = excluded.updated_ts",
+                    (str(name), time.time()),
+                )
+                connection.execute(
+                    "UPDATE skills_stats SET fail_count = 0 WHERE name = ?", (str(name),)
+                )
+        except sqlite3.Error as exc:  # noqa: BLE001 - флаг не критичнее диалога
+            logger.warning("скиллы: не удалось включить {}: {}", name, exc)
+            return False
+        self._skills[str(name)] = manifest.model_copy(update={"enabled": True})
+        logger.info("скиллы: {} включён, серия ошибок сброшена", name)
+        return True
+
     # --- статистика ---
 
     def _connect(self) -> sqlite3.Connection:
@@ -365,6 +422,7 @@ class SkillRegistry:
     def _ensure_stats(self) -> None:
         with closing(self._connect()) as connection, connection:
             connection.executescript(STATS_SCHEMA)
+            connection.executescript(FLAGS_SCHEMA)
 
     def stats(self, name: str) -> SkillStats | None:
         """Статистика скилла (None, если он ещё ни разу не вызывался)."""

@@ -189,21 +189,27 @@ class Planner:
         source: str,
     ) -> dict[str, Any]:
         """Умения нет: записать пробел и вернуть missing для озвучки."""
-        self._record_gap(command, missing, attempted)
-        return {"skill": None, "args": {}, "missing": missing, "source": source}
+        gap_id = self._record_gap(command, missing, attempted)
+        return {
+            "skill": None,
+            "args": {},
+            "missing": missing,
+            "source": source,
+            "gap_id": gap_id,
+        }
 
     def _record_gap(
         self,
         command: str,
         missing: list[dict[str, str]],
         attempted: str | None = None,
-    ) -> None:
-        """Записать пробел в capability_gaps (сбой БД не должен ломать диалог)."""
+    ) -> int | None:
+        """Записать пробел в capability_gaps. Возвращает id строки (None при сбое)."""
         entry = missing[0] if missing else {}
         capability = str(entry.get("capability") or command).strip() or command
         why = str(entry.get("why") or "нет подходящего скилла").strip()
         try:
-            self.gaps.record_gap(
+            return self.gaps.record_gap(
                 command=command,
                 user_intent=capability,
                 skill_attempted=attempted,
@@ -211,3 +217,4 @@ class Planner:
             )
         except Exception as exc:  # noqa: BLE001 - журнал не критичен для ответа
             logger.warning("планировщик: не удалось записать пробел: {}", exc)
+            return None

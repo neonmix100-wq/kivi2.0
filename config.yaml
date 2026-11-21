@@ -85,6 +85,12 @@ planner:
   catalog_max_tokens: 600        # бюджет каталога умений в промпте планировщика
   fallback_on_parse_error: true  # битый JSON/чужое имя скилла -> старый difflib
 
+gap_closer:
+  min_frequency: 3          # пытаться закрыть пробел после 3 запросов
+  reactivate_threshold: 0.7 # difflib-порог похожести имени/триггеров
+  compose_enabled: true     # разрешать LLM-композицию из умений
+  ask_enabled: true         # разрешать уточняющие вопросы пользователю
+
 budget:
   brain_monthly_rub: 3000
   voice_monthly_rub: 800
