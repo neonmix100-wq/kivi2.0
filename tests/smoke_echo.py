@@ -86,6 +86,17 @@ def main() -> int:
         f"dropped={other_suppressor.echo_dropped}, cleaned={other_suppressor.echo_cleaned}",
     )
 
+    disabled = EchoSuppressor(
+        ref=ref, samplerate=SR, enabled=False, corr_threshold=0.6
+    )
+    out_disabled = disabled.process(mic_echo, now=t0 + FRAMES / SR)
+    ok &= check(
+        "enabled=false -> сквозная передача",
+        np.array_equal(out_disabled, mic_echo)
+        and disabled.echo_dropped == 0
+        and disabled.echo_cleaned == 0,
+    )
+
     voice = _signal(4, 0.04)
     ref_voice = PlaybackRef(SR)
     ref_voice.write(signal, samplerate=SR, at=t0)
