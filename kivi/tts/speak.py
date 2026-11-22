@@ -169,73 +169,16 @@ def play_file(
     samplerate: int | None = None,
     run_id: str | None = None,
 ) -> float:
-    """Проиграть файл единственным плеером ffplay. Блокирует до конца."""
-    global _player, _player_id
-    ffplay = shutil.which("ffplay")
-    if ffplay is None:
-        raise SpeakError("ffplay не найден в PATH")
-    if not path.exists() or path.stat().st_size == 0:
-        raise SpeakError(f"Пустой аудиофайл: {path}")
+    """Проиграть файл через output.py на актуальном выходе; блокирует до конца."""
+    from kivi.audio.output import play_file as output_play_file
 
-    args = [ffplay, "-nodisp", "-autoexit", "-loglevel", "error"]
-    if samplerate is not None:
-        args += ["-f", "s16le", "-ar", str(int(samplerate))]
-    else:
-        # mp3/wav из кэша: ffplay умеет свою громкость (PCM масштабируется выше).
-        args += ["-volume", str(int(round(tts_volume() * 100)))]
-    args.append(str(path))
-
-    wait_for = None
-    with _PLAYER_LOCK:
-        current = _player
-        same_run = (
-            current is not None
-            and current.poll() is None
-            and run_id is not None
-            and _player_id == run_id
-        )
-        if same_run:
-            # Тот же ответ (следующее предложение): текущее доигрываем, не обрываем.
-            wait_for = current
-        else:
-            _stop_player_locked()
-
-    if wait_for is not None:
-        try:
-            wait_for.wait()
-        except Exception:  # noqa: BLE001 - процесс мог завершиться сам
-            pass
-        with _PLAYER_LOCK:
-            if _player is wait_for:
-                _player = None
-                _player_id = None
-
-    with _PLAYER_LOCK:
-        proc = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _player, _player_id = proc, run_id
-
-    started = time.perf_counter()
-    try:
-        code = proc.wait()
-    except KeyboardInterrupt:
-        with _PLAYER_LOCK:
-            _stop_player_locked()
-        raise
-    elapsed = time.perf_counter() - started
-
-    with _PLAYER_LOCK:
-        if _player is proc:
-            _player = None
-            _player_id = None
-
-    if code != 0:
-        logger.info("озвучка: прервана id={} (ffplay код {})", run_id, code)
-    return elapsed
+    volume = tts_volume() if samplerate is None else 1.0
+    return output_play_file(
+        Path(path),
+        samplerate=samplerate,
+        run_id=run_id,
+        volume=volume,
+    )
 
 
 def _credentials() -> tuple[str, str]:
@@ -424,8 +367,13 @@ def speak(
     phrase = " ".join(str(text).split())
     if not phrase:
         raise SpeakError("Пустой текст для озвучки")
-    settings = get_settings()
-    device = settings.devices.output_index if device_index is None else device_index
+    from kivi.audio.output import resolve_output_device
+
+    device = (
+        resolve_output_device()[0]
+        if device_index is None
+        else int(device_index)
+    )
     model_id, voice_id = _tts_settings(model, voice)
     _ffprobe()
 

@@ -31,6 +31,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "DeviceNotFoundError",
+    "EchoConfig",
     "Settings",
     "find_device",
     "get_settings",
@@ -53,6 +54,17 @@ class DeviceNotFoundError(RuntimeError):
     """Аудиоустройство из config.yaml не найдено в системе."""
 
 
+class EchoConfig(BaseModel):
+    """Мини-AEC по референсу воспроизведения."""
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    corr_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    tail_ms: int = Field(default=600, ge=0)
+    max_delay_ms: int = Field(default=400, ge=0)
+
+
 class AudioConfig(BaseModel):
     """Секция audio из config.yaml. Лишние ключи не ломают загрузку."""
 
@@ -62,7 +74,7 @@ class AudioConfig(BaseModel):
     input_device_name: str
     input_fallback_name: str = ""
     input_gain: float = Field(default=1.0, gt=0)
-    output_device_name: str
+    output_device_name: str = ""
     capture_samplerate: int = Field(default=48000, gt=0)
     target_samplerate: int = Field(default=16000, gt=0)
     playback_samplerate: int = Field(default=48000, gt=0)
@@ -70,6 +82,7 @@ class AudioConfig(BaseModel):
     channels: int = Field(default=1, ge=1)
     block_ms: int = Field(default=32, gt=0)
     aec: bool = False
+    echo: EchoConfig = Field(default_factory=EchoConfig)
     vad_end_silence_ms: int = Field(default=400, gt=0)
     barge_in_ms: int = Field(default=250, ge=0)
     pre_roll_ms: int = Field(default=300, gt=0)
@@ -177,6 +190,26 @@ def find_device(
     return best
 
 
+def _default_output_device() -> tuple[int, str] | None:
+    """Системный выход Windows по умолчанию на момент вызова."""
+    try:
+        pair = sd.default.device
+        index = pair[1] if isinstance(pair, (tuple, list)) and len(pair) > 1 else None
+    except Exception:  # noqa: BLE001 - PortAudio мог не инициализироваться
+        index = None
+    if index is not None:
+        try:
+            device = sd.query_devices(int(index))
+            if int(device["max_output_channels"]) > 0:
+                return int(index), str(device["name"])
+        except Exception:  # noqa: BLE001 - индекс мог устареть
+            pass
+    for idx, device in enumerate(sd.query_devices()):
+        if int(device["max_output_channels"]) > 0:
+            return idx, str(device["name"])
+    return None
+
+
 def describe_devices(want_input: bool | None = None) -> str:
     """Список устройств для текста ошибки."""
     apis = sd.query_hostapis()
@@ -237,13 +270,18 @@ def resolve_audio_devices(audio: AudioConfig) -> AudioDevices:
             found[1],
         )
 
-    output = find_device(audio.output_device_name, want_input=False, hostapi=hostapi)
+    output_name = (audio.output_device_name or "").strip()
+    if output_name:
+        output = find_device(output_name, want_input=False, hostapi=hostapi)
+    else:
+        output = _default_output_device()
     if output is None:
         raise DeviceNotFoundError(
-            "Не найдены наушники {!r} (hostapi {!r}).\n"
-            "Проверь, что они подключены, и поправь audio.output_device_name в config.yaml.\n"
+            "Не найдено устройство вывода (hostapi {!r}).\n"
+            "Проверь, что выход подключён, и задай audio.output_device_name в config.yaml "
+            "или оставь его пустым для системного выхода Windows.\n"
             "Доступные устройства вывода:\n{}".format(
-                audio.output_device_name, audio.hostapi, describe_devices(False)
+                audio.hostapi, describe_devices(False)
             )
         )
 

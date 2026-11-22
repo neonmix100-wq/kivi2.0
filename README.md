@@ -50,7 +50,7 @@ STT: локально faster-whisper large-v3-turbo, CUDA int8_float16, 0.2-0.5�
   пока говорит сама — входящие фразы отбрасываются.
 
 ## Карта модулей
-kivi/audio/{capture,vad,recorder}; kivi/stt/{local,transcribe};
+kivi/audio/{capture,vad,recorder,output,echo}; kivi/stt/{local,transcribe};
 kivi/tts/{speak,cache,stream,fillers}; kivi/brain/{router,providers,budget,
 session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
 kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search,reminders,recall};
@@ -65,14 +65,15 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched,routine}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine,echo}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Recall отвечает по конкретному вопросу: перед чтением памяти cheap-LLM
-(`task_type=intent`) извлекает `keywords/date_refs`; записи фильтруются по
-подстроке keywords и по дате, пустой фильтр сохраняет прежний обзор.
-Проверки: `python tests\smoke_routine.py`; регрессии
-smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api.
+Выход звука выбирается через `kivi/audio/output.py`: имя из config по подстроке
+или системный default Windows, смена выхода логируется и кэшируется не дольше
+2 с. Добавлен мини-AEC `kivi/audio/echo.py`: PlaybackRef 3 с, задержка до 400 мс
+шагом 8 мс, корреляция/вычитание, tail 600 мс, счётчики; capture отдаёт
+очищенные кадры до VAD. Проверки: `python tests\smoke_echo.py` -> PASS;
+регрессии smoke_routine, smoke_memory_deep, smoke_flow, smoke_dialogue.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

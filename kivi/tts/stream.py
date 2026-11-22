@@ -32,6 +32,8 @@ import sounddevice as sd
 from kivi.brain.persona import to_speech
 from kivi.config import get_settings
 from kivi.log import logger
+from kivi.audio.echo import get_playback_ref
+from kivi.audio.output import resolve_output_device
 from kivi.tts import fillers
 from kivi.tts.speak import (
     TMP_DIR,
@@ -95,8 +97,8 @@ class SentenceSpeaker:
         self.ack_delay_s = float(ack_delay_s)
         self.context = fillers.normalize_context(context)
 
-        settings = get_settings()
-        self._device_index = settings.devices.output_index
+        self._device_index, self._device_name, self._device_sr = resolve_output_device()
+        self._ref = get_playback_ref(int(get_settings().audio.capture_samplerate))
         self._output_sr, self._out_channels = self._pick_output_format()
         self._overlap = max(1, int(self._output_sr * OVERLAP_MS / 1000))
 
@@ -355,6 +357,13 @@ class SentenceSpeaker:
             return mono.reshape(-1, 1)
         return np.repeat(mono.reshape(-1, 1), self._out_channels, axis=1)
 
+    def _write_frames(self, mono: np.ndarray) -> None:
+        """Отправить ровно этот PCM в поток и в референс AEC."""
+        if mono.size == 0 or self._stream is None:
+            return
+        self._ref.write(mono, samplerate=self._output_sr)
+        self._stream.write(self._frames(mono))
+
     def _write_pcm(self, chunk: np.ndarray) -> None:
         """Записать чанк с кроссфейдом на стыке (без щелчков).
 
@@ -370,7 +379,7 @@ class SentenceSpeaker:
             if chunk.size <= overlap:
                 self._tail = chunk.copy()
                 return
-            self._stream.write(self._frames(chunk[:-overlap]))
+            self._write_frames(chunk[:-overlap])
             self._samples_written += chunk.size - overlap
             self._tail = chunk[-overlap:].copy()
             return
@@ -384,16 +393,16 @@ class SentenceSpeaker:
             head = np.pad(head, (0, overlap - head.size))
         fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
         mixed = tail.astype(np.float32) * (1.0 - fade_in) + head.astype(np.float32) * fade_in
-        self._stream.write(self._frames(np.clip(mixed, -32768, 32767).astype(np.int16)))
+        self._write_frames(np.clip(mixed, -32768, 32767).astype(np.int16))
         self._samples_written += overlap
 
         rest = chunk[overlap:]
         if rest.size > overlap:
-            self._stream.write(self._frames(rest[:-overlap]))
+            self._write_frames(rest[:-overlap])
             self._samples_written += rest.size - overlap
             self._tail = rest[-overlap:].copy()
         elif rest.size > 0:
-            self._stream.write(self._frames(rest))
+            self._write_frames(rest)
             self._samples_written += rest.size
             self._tail = np.zeros(0, dtype=np.int16)
         else:
@@ -445,7 +454,7 @@ class SentenceSpeaker:
             if self._stream is not None:
                 try:
                     if self._tail.size:
-                        self._stream.write(self._frames(self._tail))
+                        self._write_frames(self._tail)
                         self._samples_written += self._tail.size
                         self._tail = np.zeros(0, np.int16)
                 except Exception:  # noqa: BLE001

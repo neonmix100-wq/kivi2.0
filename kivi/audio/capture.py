@@ -14,6 +14,7 @@ import numpy as np
 import sounddevice as sd
 
 from kivi.config import AudioConfig
+from kivi.audio.echo import EchoSuppressor
 from kivi.log import logger
 
 __all__ = ["AudioCapture", "CaptureError"]
@@ -35,6 +36,12 @@ class AudioCapture:
         self.device_index = int(device_index)
         self.ring_seconds = float(ring_seconds)
         self.input_gain = float(audio.input_gain)
+        echo_config = getattr(audio, "echo", None)
+        self.echo = (
+            EchoSuppressor.from_config(echo_config, self.samplerate)
+            if echo_config is not None
+            else None
+        )
 
         self._capacity = int(self.samplerate * self.ring_seconds)  # 48000 сэмплов = 1 с
         self._buffer = np.zeros(self._capacity, dtype=np.int16)
@@ -207,7 +214,8 @@ class AudioCapture:
                 if remaining <= 0:
                     return None
                 self._data_ready.wait(remaining)
-            return self._apply_gain(self._read_locked(frames))
+            block = self._apply_gain(self._read_locked(frames))
+            return self.echo.process(block, now=time.monotonic()) if self.echo else block
 
     def snapshot(self, milliseconds: float) -> np.ndarray:
         """Последние `milliseconds` мс из кольцевого буфера. Данные не потребляет.
@@ -229,7 +237,8 @@ class AudioCapture:
                 block = np.concatenate(
                     (self._buffer[start:], self._buffer[: count - first])
                 )
-            return self._apply_gain(block)
+            block = self._apply_gain(block)
+            return self.echo.process(block, now=time.monotonic()) if self.echo else block
 
     @property
     def is_running(self) -> bool:
