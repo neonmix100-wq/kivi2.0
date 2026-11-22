@@ -111,6 +111,7 @@ api:
   port: 8765
   ask_timeout_s: 60
   confirm_timeout_s: 120
+  text_speaks: true
 
 conversation:
   enabled: true

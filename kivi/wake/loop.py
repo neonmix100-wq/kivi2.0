@@ -231,6 +231,8 @@ class WakeLoop:
         self._speaking = False  # True пока Киви озвучивает ответ (защита от самослушания)
         self._stop = threading.Event()
         self._speaker: SentenceSpeaker | None = None  # активная озвучка ответа
+        # Очередь turn'ов: голос и текст не должны отвечать одновременно.
+        self._turn_lock = threading.RLock()
 
         # Долгая память: блок в промпт + рефлексия по расписанию.
         memory_cfg = self.settings.section("memory")
@@ -537,11 +539,14 @@ class WakeLoop:
             self.window_until = 0.0
             if self._is_greeting(command):
                 wake_log.info("диалог: приветствие -> chat")
-                self._answer_chat(
+                answer = self._answer_chat(
                     command,
                     {"route": "chat", "source": "greeting"},
                     time.perf_counter(),
                 )
+                if answer:
+                    self._emit_turn("user", command, "chat", "voice")
+                    self._emit_turn("kivi", answer, "chat", "voice")
             else:
                 self._think_and_speak(command)
 
@@ -553,25 +558,148 @@ class WakeLoop:
                 wake_log.error("колбэк on_result упал: {}", exc)
 
     def _think_and_speak(self, command: str) -> None:
-        """Ровно один ответ на команду: маршрут берём из planner.plan()."""
+        """Голосовой путь: единый handle_command(source='voice')."""
+        self.handle_command(command, source="voice")
+
+    def handle_command(
+        self,
+        command: str,
+        source: str = "voice",
+        *,
+        speak: bool | None = None,
+    ) -> tuple[str, str]:
+        """Единая точка: planner -> route -> ответ -> session + turn events."""
+        text = " ".join(str(command or "").split())
+        src = "text" if str(source).lower() == "text" else "voice"
+        if not text:
+            return "", "chat"
+        if speak is None:
+            if src == "text":
+                speak = bool(self.settings.section("api").get("text_speaks", True))
+            else:
+                speak = True
         started = time.perf_counter()
-        session = self._get_session()
+        route = "chat"
+        response = ""
+        with self._turn_lock:
+            self.state = "THINKING"
+            session = self._get_session()
+            try:
+                plan = self._plan_skill(text, session.history())
+                route = str((plan or {}).get("route") or "chat")
+                if route not in ("skill", "search", "action_gap", "chat"):
+                    route = "chat"
+                if route == "skill" and (plan is None or plan.get("skill") is None):
+                    route = "chat"
+                if plan is not None and plan.get("skill") is not None:
+                    route = "skill"
+                    response = self._run_skill_collect(
+                        text,
+                        plan["skill"],
+                        plan.get("args") or {},
+                        speak=bool(speak),
+                    )
+                elif route == "search":
+                    response = self._answer_search_collect(
+                        text, plan, started, speak=bool(speak)
+                    )
+                elif route == "action_gap":
+                    response = self._answer_action_gap_collect(
+                        text, plan, started, speak=bool(speak)
+                    )
+                else:
+                    response = self._answer_chat_collect(
+                        text, plan, started, speak=bool(speak)
+                    )
+            except Exception as exc:  # noqa: BLE001 - ответ должен вернуться в API
+                wake_log.error(
+                    "handle_command {}: {}: {}",
+                    src,
+                    type(exc).__name__,
+                    exc,
+                )
+                response = ""
+            response = " ".join(str(response or "").split())
+            if response:
+                session.add("user", text, route=route, source=src)
+                session.add("assistant", response, route=route, source=src)
+                if src == "voice":
+                    self._open_window()
+                self._emit_turn("user", text, route, src)
+                self._emit_turn("kivi", response, route, src)
+                self._note_turn()
+            if src == "voice":
+                self._drain()
+                self.vad.reset()
+            self.state = "IDLE"
+            wake_log.info(
+                "turn: source={}, route={}, {:.0f} мс, ответ {!r}",
+                src,
+                route,
+                (time.perf_counter() - started) * 1000.0,
+                response[:80],
+            )
+        return response, route
 
-        plan = self._plan_skill(command, session.history())
-        route = str((plan or {}).get("route") or "chat")
+    def _emit_turn(
+        self, role: str, text: str, route: str, source: str
+    ) -> None:
+        """Отправить turn всем WS-клиентам (голос и текст)."""
+        api = getattr(self, "api", None)
+        if api is None:
+            return
+        payload = {
+            "event": "turn",
+            "role": role,
+            "text": str(text),
+            "ts": time.time(),
+            "route": str(route or ""),
+            "source": str(source or ""),
+        }
+        try:
+            if hasattr(api, "broadcast_turn"):
+                api.broadcast_turn(
+                    role=role,
+                    text=str(text),
+                    ts=payload["ts"],
+                    route=str(route or ""),
+                    source=str(source or ""),
+                )
+            elif hasattr(api, "broadcast"):
+                api.broadcast(payload)
+        except Exception as exc:  # noqa: BLE001 - UI не должен ронять цикл
+            wake_log.debug("api: turn не отправлен: {}", exc)
 
-        if plan is not None and plan.get("skill") is not None:
-            self._run_skill(command, plan["skill"], plan.get("args") or {})
-            return
-        if route == "search":
-            self._answer_search(command, plan, started)
-            return
-        if route == "action_gap":
-            self._answer_action_gap(command, plan, started)
-            return
-        self._answer_chat(command, plan, started)
+    def _run_skill_collect(
+        self,
+        command: str,
+        manifest: SkillManifest,
+        args: dict,
+        *,
+        speak: bool,
+    ) -> str:
+        """Выполнить скилл и вернуть текст; озвучка — только при speak."""
+        from kivi.skills.loader import invoke
 
-    def _answer_chat(self, command: str, plan: dict | None, started: float) -> None:
+        self.state = "THINKING"
+        wake_log.info("THINKING -> скилл {}: {!r}", manifest.name, command)
+        try:
+            answer = invoke(manifest, args, registry=self.skills)
+        except Exception as exc:  # noqa: BLE001 - скилл не должен ронять цикл
+            wake_log.error(
+                "скилл {}: invoke упал: {}: {}",
+                manifest.name,
+                type(exc).__name__,
+                exc,
+            )
+            answer = f"Скилл «{manifest.name}» упал."
+        text = " ".join(str(answer).split())
+        if text and speak:
+            self._say(text)
+        return text
+
+    def _answer_chat(self, command: str, plan: dict | None, started: float) -> str:
+
         """Разговорный путь: один стрим Router -> SentenceSpeaker."""
         session = self._get_session()
         memory = self._memory_block(command)
@@ -627,8 +755,18 @@ class WakeLoop:
         full_text = "".join(parts).strip()
         if full_text:
             # В историю пишем очищенный ответ целиком (без лимита в 40 слов).
-            session.add("user", command)
-            session.add("assistant", to_speech(full_text, max_words=10000))
+            session.add(
+                "user",
+                command,
+                route=str((plan or {}).get("route") or "chat"),
+                source="voice",
+            )
+            session.add(
+                "assistant",
+                to_speech(full_text, max_words=10000),
+                route=str((plan or {}).get("route") or "chat"),
+                source="voice",
+            )
             self._open_window()
 
         self._note_turn()
@@ -636,8 +774,128 @@ class WakeLoop:
         self.vad.reset()
         self.state = "IDLE"
         wake_log.info("вернулся в IDLE")
+        return full_text
+
+    def _answer_chat_collect(
+        self,
+        command: str,
+        plan: dict | None,
+        started: float,
+        *,
+        speak: bool,
+    ) -> str:
+        """Разговорный путь без записи в session; озвучка по флагу speak."""
+        session = self._get_session()
+        memory = self._memory_block(command)
+        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
+        messages = (
+            [{"role": "system", "content": system_text}]
+            + session.history()
+            + [{"role": "user", "content": command}]
+        )
+        wake_log.info(
+            "THINKING -> chat: {!r} (в контексте {} реплик, память {} символов, speak={})",
+            command,
+            len(messages) - 2,
+            len(memory),
+            speak,
+        )
+        self.state = "THINKING"
+        parts: list[str] = []
+        speaker: SentenceSpeaker | None = None
+        if speak:
+            speaker = SentenceSpeaker(started_at=started, context="think")
+            self._speaker = speaker
+            self._speaking = True
+        try:
+            if self.think_fn is not None:
+                text = str(self.think_fn(command) or "")
+                if text:
+                    parts.append(text)
+                    if speaker is not None:
+                        speaker.feed(text)
+            elif self.router is None:
+                wake_log.warning("роутер не задан — команду не обрабатываю: {!r}", command)
+            elif speaker is not None and hasattr(self.router, "complete_stream"):
+                for chunk in self.router.complete_stream(messages, task_type="chat"):
+                    parts.append(chunk)
+                    speaker.feed(chunk)
+            else:
+                result = self.router.complete(messages, task_type="chat")
+                text = str((result or {}).get("text") or "")
+                if text:
+                    parts.append(text)
+                    if speaker is not None:
+                        speaker.feed(text)
+        except Exception as exc:  # noqa: BLE001 - сеть/бюджет
+            wake_log.error("LLM не ответил: {}: {}", type(exc).__name__, exc)
+        finally:
+            if speaker is not None:
+                self.state = "SPEAKING"
+                try:
+                    speaker.finish()
+                except Exception as exc:  # noqa: BLE001
+                    wake_log.error("озвучка стрима упала: {}", exc)
+                finally:
+                    self._speaking = False
+                    self._speaker = None
+        return "".join(parts).strip()
+
+    def _answer_search_collect(
+        self,
+        command: str,
+        plan: dict | None,
+        started: float,
+        *,
+        speak: bool,
+    ) -> str:
+        """Поиск без записи в session; озвучка по флагу speak."""
+        from kivi.skills.search import NO_DATA_ANSWER, answer_search
+
+        self.state = "THINKING"
+        wake_log.info("THINKING -> search: {!r} (speak={})", command, speak)
+        session = self._get_session()
+        settings = self.search_config or {}
+        try:
+            max_results = int(settings.get("max_results") or 3)
+            timeout_s = float(settings.get("timeout_s") or 15.0)
+        except (TypeError, ValueError):
+            max_results, timeout_s = 3, 15.0
+        speaker = SentenceSpeaker(started_at=started, context="search") if speak else None
+        if speaker is not None:
+            self._speaker = speaker
+        text = ""
+        try:
+            text = answer_search(
+                command,
+                session.history(),
+                router=self.router,
+                max_results=max_results,
+                timeout=timeout_s,
+            )
+            text = " ".join(str(text or "").split())
+        except Exception as exc:  # noqa: BLE001 - поиск не должен ронять цикл
+            wake_log.error("поиск упал: {}: {}", type(exc).__name__, exc)
+            text = ""
+        if not text or text == NO_DATA_ANSWER:
+            self._record_gap(command, plan, why="поиск не дал ответа")
+            text = NO_DATA_ANSWER
+        if speaker is not None:
+            try:
+                self.state = "SPEAKING"
+                self._speaking = True
+                speaker.feed(text)
+                speaker.finish()
+            except Exception as exc:  # noqa: BLE001
+                wake_log.error("озвучка поиска упала: {}", exc)
+            finally:
+                self._speaking = False
+                self._speaker = None
+        wake_log.info("поиск: ответ {!r}", text[:80])
+        return text
 
     def _answer_search(self, command: str, plan: dict | None, started: float) -> None:
+
         """Поиск по переформулированному запросу; ровно одна озвучка."""
         from kivi.skills.search import NO_DATA_ANSWER, answer_search
 
@@ -686,6 +944,41 @@ class WakeLoop:
 
         wake_log.info("поиск: ответ {!r}", text[:80])
         self._complete_turn(command, text)
+
+    def _answer_action_gap_collect(
+        self,
+        command: str,
+        plan: dict | None,
+        started: float,
+        *,
+        speak: bool,
+    ) -> str:
+        """Action gap без записи в session; озвучка по флагу speak."""
+        self.state = "THINKING"
+        wake_log.info("THINKING -> action_gap: {!r} (speak={})", command, speak)
+        speaker = SentenceSpeaker(started_at=started, context="think") if speak else None
+        if speaker is not None:
+            self._speaker = speaker
+        text = ""
+        gap_id = self._frequent_gap_id(plan)
+        if gap_id is not None:
+            success, how, message = self._gap_message(gap_id)
+            wake_log.info("пробел {}: {} -> {}", gap_id, how, success)
+            text = " ".join(str(message).split())
+        if not text:
+            text = "Пока не могу это сделать, но запомнила, что тебе это нужно."
+        if speaker is not None:
+            try:
+                self.state = "SPEAKING"
+                self._speaking = True
+                speaker.feed(text)
+                speaker.finish()
+            except Exception as exc:  # noqa: BLE001
+                wake_log.error("озвучка пробела упала: {}", exc)
+            finally:
+                self._speaking = False
+                self._speaker = None
+        return text
 
     def _answer_action_gap(self, command: str, plan: dict | None, started: float) -> None:
         """Действие без умения: попытка закрыть пробел или честный короткий ответ."""

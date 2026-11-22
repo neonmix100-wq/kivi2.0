@@ -4,13 +4,15 @@
     status{state,budget_used,volume,window_open}
     ask{id,question,options}, confirm{id,title,body,details}
     info{text}, log{line,level} (хвост лога, уровень>=INFO, кольцо 200 строк)
+    turn{role,text,ts,route,source} (user/kivi; voice/text)
 
 Команды (clients -> core):
     ask{question,options}, confirm{title,body,details}, info{text},
     ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
     get_status, get_gaps{limit}, get_skills, set_skill_enabled{name,enabled},
     test_skill{name}, close_gap{id}, attempt_gap{id}, get_memory{kind},
-    reflect_now, reminders_list, cancel_reminder{id}, tail_logs{n}, shutdown
+    reflect_now, reminders_list, cancel_reminder{id}, tail_logs{n},
+    send_text{text}, get_history{limit}, shutdown
 Ответ на команду: {ok, ...}.
 
 Слушаем СТРОГО 127.0.0.1. Аутентификации нет: доступен только loopback.
@@ -66,6 +68,7 @@ class ApiConfig(BaseModel):
     port: int = Field(default=DEFAULT_PORT, ge=0, le=65535)
     ask_timeout_s: float = Field(default=DEFAULT_ASK_TIMEOUT_S, gt=0)
     confirm_timeout_s: float = Field(default=DEFAULT_CONFIRM_TIMEOUT_S, gt=0)
+    text_speaks: bool = True
 
 
 def load_api_config(path: Path | None = None) -> dict[str, Any]:
@@ -121,6 +124,7 @@ class ApiServer:
         self._ready = threading.Event()
         self._log_sink: int | None = None
         self._shutdown_callback: Callable[[], object] | None = None
+        self.text_speaks = bool(parsed.text_speaks)
         self.pending = PendingRegistry(
             connected=lambda: self.has_clients,
             send=self.broadcast,
@@ -275,6 +279,27 @@ class ApiServer:
         except RuntimeError:
             return False
         return True
+
+    def broadcast_turn(
+        self,
+        *,
+        role: str,
+        text: str,
+        ts: float,
+        route: str,
+        source: str,
+    ) -> bool:
+        """Событие turn для UI: обе роли, голос и текст."""
+        return self.broadcast(
+            {
+                "event": "turn",
+                "role": str(role),
+                "text": str(text),
+                "ts": float(ts),
+                "route": str(route or ""),
+                "source": str(source or ""),
+            }
+        )
 
     async def _enqueue_all(self, payload: str, *, skip_if_full: bool) -> None:
         """Разложить событие по очередям клиентов (INFO при переполнении режем)."""
@@ -482,6 +507,63 @@ class ApiServer:
             "message": str(message),
         }
 
+    def get_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Turn текущей сессии хронологически (role=kivi для assistant)."""
+        core = self._core
+        getter = getattr(core, "_get_session", None)
+        if not callable(getter):
+            return []
+        try:
+            session = getter()
+            if session is None:
+                return []
+            if hasattr(session, "turns"):
+                rows = session.turns(limit)
+            elif hasattr(session, "history"):
+                rows = [
+                    {
+                        "role": "kivi" if str(item.get("role")) == "assistant" else str(item.get("role")),
+                        "text": str(item.get("content") or ""),
+                        "ts": 0.0,
+                        "route": "",
+                        "source": "",
+                    }
+                    for item in session.history(max_tokens=10000)
+                ][-max(1, int(limit)):]
+            else:
+                rows = []
+            return [dict(row) for row in rows]
+        except Exception as exc:  # noqa: BLE001 - UI не должен падать
+            logger.warning("api: get_history упал: {}: {}", type(exc).__name__, exc)
+            return []
+
+    def send_text(self, text: str) -> dict[str, Any]:
+        """Текстовая реплика в тот же handle_command, что и голос."""
+        phrase = " ".join(str(text or "").split())
+        if not phrase:
+            return {"ok": False, "error": "empty text"}
+        core = self._core
+        handler = getattr(core, "handle_command", None)
+        if not callable(handler):
+            return {"ok": False, "error": "core handle_command unavailable"}
+        try:
+            response, route = handler(
+                phrase,
+                source="text",
+                speak=bool(self.text_speaks),
+            )
+        except TypeError:
+            # Совместимость с ядром без необязательного speak.
+            response, route = handler(phrase, source="text")
+        except Exception as exc:  # noqa: BLE001 - ошибка должна вернуться клиенту
+            logger.warning("api: send_text упал: {}: {}", type(exc).__name__, exc)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": True,
+            "response": str(response or ""),
+            "route": str(route or "chat"),
+        }
+
     def reminders_list(self) -> list[dict[str, Any]]:
         from kivi.skills.reminders import list_reminders
 
@@ -628,6 +710,19 @@ class ApiServer:
                     "items": self.memory_items(kind),
                     "lines": self.memory_lines(kind),
                 },
+            )
+        elif command == "send_text":
+            text = str(message.get("text") or "")
+            result = await asyncio.to_thread(self.send_text, text)
+            await self._reply(websocket, result)
+        elif command == "get_history":
+            try:
+                limit = int(message.get("limit") or 50)
+            except (TypeError, ValueError):
+                limit = 50
+            await self._reply(
+                websocket,
+                {"ok": True, "turns": self.get_history(limit)},
             )
         elif command == "reminders_list":
             await self._reply(

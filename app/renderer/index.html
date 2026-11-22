@@ -40,6 +40,7 @@
 
         <nav class="nav">
           <button class="nav-item active" data-page="overview">Обзор</button>
+          <button class="nav-item" data-page="chat">Чат</button>
           <button class="nav-item" data-page="logs">Логи</button>
           <button class="nav-item" data-page="memory">Память</button>
           <button class="nav-item" data-page="skills">Скиллы</button>
@@ -146,6 +147,25 @@
               <button class="font-tile" data-font="verdana"><span class="font-preview font-verdana">Kivi</span><span>Verdana</span></button>
               <button class="font-tile" data-font="georgia"><span class="font-preview font-georgia">Kivi</span><span>Georgia</span></button>
             </div>
+          </article>
+        </section>
+
+        <section class="page" id="page-chat">
+          <div class="page-head">
+            <div>
+              <h1>Чат</h1>
+              <p>Голосовые и текстовые реплики в одном диалоге.</p>
+            </div>
+            <button class="ghost-btn" id="btn-chat-refresh">Обновить</button>
+          </div>
+          <article class="panel chat-panel">
+            <div class="chat-feed" id="chat-feed"></div>
+            <div class="chat-typing" id="chat-typing" hidden>Киви печат…</div>
+            <form class="chat-compose" id="chat-form">
+              <textarea id="chat-input" rows="2" placeholder="Напиши Киви… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+              <button class="ghost-btn chat-send" id="btn-chat-send" type="submit">Отправить</button>
+            </form>
+            <div class="muted" id="chat-state"></div>
           </article>
         </section>
 

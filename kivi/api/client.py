@@ -28,6 +28,7 @@ class ApiClient:
         self.request_timeout = float(request_timeout)
         self.ask_timeout = float(ask_timeout)
         self._lock = threading.RLock()
+        self.events: list[dict[str, Any]] = []
         self._ws = connect(uri, open_timeout=open_timeout, legacy=True)
 
     def request(self, command: str, timeout: float | None = None, **fields: Any) -> dict[str, Any]:
@@ -40,6 +41,8 @@ class ApiClient:
                 message = json.loads(raw)
                 if isinstance(message, dict) and "ok" in message:
                     return message
+                if isinstance(message, dict):
+                    self.events.append(message)
 
     def ask(self, question: str, options: list[str] | None = None) -> str | None:
         reply = self.request(

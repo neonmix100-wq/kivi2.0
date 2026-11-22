@@ -66,15 +66,15 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched,routine,echo}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine,echo,chat_ui}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Выход звука выбирается через `kivi/audio/output.py`: имя из config по подстроке
-или системный default Windows, смена выхода логируется и кэшируется не дольше
-2 с. Добавлен мини-AEC `kivi/audio/echo.py`: PlaybackRef 3 с, задержка до 400 мс
-шагом 8 мс, корреляция/вычитание, tail 600 мс, счётчики; capture отдаёт
-очищенные кадры до VAD. Проверки: `python tests\smoke_echo.py` -> PASS;
-регрессии smoke_routine, smoke_memory_deep, smoke_flow, smoke_dialogue.
+Секция «Чат»: `WakeLoop.handle_command(command, source)` — общая точка для
+голоса и текста; `send_text`/`get_history` в WS API, события `turn` для обеих
+ролей, общий lock turn'ов, `api.text_speaks`. В UI лента пузырей, history(50),
+live WS turn, ввод Enter/Shift+Enter и индикатор «Киви печат…».
+Проверки: `python tests\smoke_chat_ui.py` -> PASS; регрессии smoke_echo,
+smoke_routine, smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

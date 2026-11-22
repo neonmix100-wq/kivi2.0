@@ -50,6 +50,11 @@ const ui = {
   scheduleWhen: $('#schedule-when'),
   scheduleWhat: $('#schedule-what'),
   scheduleAdd: $('#btn-schedule-add'),
+  chatFeed: $('#chat-feed'),
+  chatTyping: $('#chat-typing'),
+  chatForm: $('#chat-form'),
+  chatInput: $('#chat-input'),
+  chatState: $('#chat-state'),
 };
 
 let socket = null;
@@ -241,6 +246,14 @@ function handleMessage(message) {
     case 'info':
       showToast(String(message.text || ''));
       noteEvent(`info: ${message.text || ''}`);
+      break;
+    case 'turn':
+      addChatTurn(message);
+      if (message.role === 'kivi') {
+        setChatTyping(false);
+        setChatState(`маршрут: ${message.route || 'chat'}`);
+      }
+      noteEvent(`turn: ${message.role} · ${message.source || ''}`);
       break;
     default:
       break;
@@ -613,7 +626,137 @@ function initGaps() {
   if (refresh) refresh.addEventListener('click', loadGaps);
 }
 
-/* --- расписание --- */
+/* --- чат --- */
+
+function setChatState(text) {
+  if (ui.chatState) ui.chatState.textContent = text;
+}
+
+function setChatTyping(active) {
+  if (ui.chatTyping) ui.chatTyping.hidden = !active;
+  if (active) scrollChatToBottom();
+}
+
+function scrollChatToBottom() {
+  if (!ui.chatFeed) return;
+  ui.chatFeed.scrollTop = ui.chatFeed.scrollHeight;
+}
+
+function chatSourceLabel(source) {
+  return source === 'voice' ? 'голос' : source === 'text' ? 'текст' : '';
+}
+
+function addChatTurn(turn, { autoScroll = true } = {}) {
+  if (!ui.chatFeed || !turn || !turn.text) return;
+  const role = turn.role === 'user' ? 'user' : turn.role === 'kivi' ? 'kivi' : '';
+  if (!role) return;
+  const empty = ui.chatFeed.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble ${role}`;
+  const text = document.createElement('div');
+  text.className = 'chat-bubble-text';
+  text.textContent = String(turn.text);
+  bubble.append(text);
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  if (role === 'kivi') {
+    const route = document.createElement('span');
+    route.className = 'chat-badge route';
+    route.textContent = String(turn.route || 'chat');
+    meta.append(route);
+  }
+  const source = document.createElement('span');
+  source.className = 'chat-badge';
+  source.textContent = chatSourceLabel(String(turn.source || ''));
+  if (source.textContent) meta.append(source);
+  if (meta.childElementCount) bubble.append(meta);
+  ui.chatFeed.append(bubble);
+  if (autoScroll) scrollChatToBottom();
+}
+
+function renderChatHistory(turns) {
+  if (!ui.chatFeed) return;
+  ui.chatFeed.replaceChildren();
+  const items = Array.isArray(turns) ? turns : [];
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'chat-empty';
+    empty.textContent = 'Пока пусто. Напиши или скажи Киви.';
+    ui.chatFeed.append(empty);
+    return;
+  }
+  items.forEach((turn) => addChatTurn(turn, { autoScroll: false }));
+  scrollChatToBottom();
+}
+
+function loadChatHistory() {
+  if (!ui.chatFeed) return;
+  setChatState('Загружаю историю…');
+  request('get_history', { limit: 50 })
+    .then((reply) => {
+      const turns = Array.isArray(reply.turns) ? reply.turns : [];
+      renderChatHistory(turns);
+      setChatState(`turn'ов: ${turns.length}`);
+    })
+    .catch((error) => {
+      if (ui.chatFeed) {
+        ui.chatFeed.textContent = 'Нет связи с ядром.';
+      }
+      setChatState(`ошибка: ${error.message || error}`);
+    });
+}
+
+function sendChatMessage() {
+  if (!ui.chatInput) return;
+  const text = String(ui.chatInput.value || '').trim();
+  if (!text) {
+    setChatState('Пустое сообщение не отправляется');
+    return;
+  }
+  ui.chatInput.value = '';
+  setChatTyping(true);
+  setChatState('Отправляю…');
+  request('send_text', { text }, 180000)
+    .then((reply) => {
+      if (!reply.ok) {
+        setChatTyping(false);
+        setChatState(reply.error || 'не удалось отправить');
+        return;
+      }
+      setChatState(`маршрут: ${reply.route || 'chat'}`);
+      // Kivi-turn обычно уже пришёл по WS; страховка на случай потери события.
+      setTimeout(() => {
+        if (!ui.chatTyping || ui.chatTyping.hidden) return;
+        setChatTyping(false);
+        loadChatHistory();
+      }, 300);
+    })
+    .catch((error) => {
+      setChatTyping(false);
+      setChatState(`ошибка: ${error.message || error}`);
+    });
+}
+
+function initChat() {
+  const refresh = $('#btn-chat-refresh');
+  if (refresh) refresh.addEventListener('click', loadChatHistory);
+  if (ui.chatForm) {
+    ui.chatForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      sendChatMessage();
+    });
+  }
+  if (ui.chatInput) {
+    ui.chatInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendChatMessage();
+      }
+    });
+  }
+}
+
 
 function initSchedule() {
   const add = ui.scheduleAdd;
@@ -643,6 +786,7 @@ function initNav() {
         section.classList.toggle('active', section.id === `page-${page}`);
       });
       if (page === 'logs') loadLogs();
+      if (page === 'chat') loadChatHistory();
       if (page === 'memory') loadMemory(memoryKind);
       if (page === 'skills') loadSkills();
       if (page === 'gaps') loadGaps();
@@ -705,6 +849,7 @@ function init() {
   initSkills();
   initGaps();
   initSchedule();
+  initChat();
   setConnection(false);
   connect();
 }

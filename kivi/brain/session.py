@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT    NOT NULL,
     ts         REAL    NOT NULL,
     role       TEXT    NOT NULL,
-    content    TEXT    NOT NULL
+    content    TEXT    NOT NULL,
+    route      TEXT    NOT NULL DEFAULT '',
+    source     TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ts);
 CREATE TABLE IF NOT EXISTS sessions (
@@ -79,6 +81,17 @@ class Session:
     def _ensure_schema(self) -> None:
         with closing(self._connect()) as connection, connection:
             connection.executescript(SCHEMA)
+            # Совместимость со старыми БД: добавляем колонки метаданных turn.
+            for column, ddl in (
+                ("route", "TEXT NOT NULL DEFAULT ''"),
+                ("source", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    connection.execute(
+                        f"ALTER TABLE messages ADD COLUMN {column} {ddl}"
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     # --- сессии ---
 
@@ -125,7 +138,14 @@ class Session:
 
     # --- реплики ---
 
-    def add(self, role: str, content: str) -> None:
+    def add(
+        self,
+        role: str,
+        content: str,
+        *,
+        route: str = "",
+        source: str = "",
+    ) -> None:
         """Добавить реплику в текущую сессию."""
         text = str(content).strip()
         if not text:
@@ -134,14 +154,50 @@ class Session:
         now = time.time()
         with closing(self._connect()) as connection, connection:
             connection.execute(
-                "INSERT INTO messages (session_id, ts, role, content) VALUES (?, ?, ?, ?)",
-                (self.session_id, now, str(role), text),
+                "INSERT INTO messages "
+                "(session_id, ts, role, content, route, source) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    self.session_id,
+                    now,
+                    str(role),
+                    text,
+                    str(route or ""),
+                    str(source or ""),
+                ),
             )
             connection.execute(
                 "UPDATE sessions SET last_ts = ? WHERE id = ?", (now, self.session_id)
             )
         self._last_activity = now
         logger.debug("Session: {} {} ({} симв.)", role, self.session_id[:8], len(text))
+
+    def turns(self, limit: int = 50) -> list[dict]:
+        """Последние turn текущей сессии в хронологическом порядке.
+
+        role=assistant превращается в kivi; route/source нужны UI чата.
+        """
+        count = max(1, min(500, int(limit)))
+        self._refresh_if_idle()
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT role, content, ts, route, source FROM messages "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (self.session_id, count),
+            ).fetchall()
+        result: list[dict] = []
+        for row in reversed(rows):
+            role = "kivi" if str(row["role"]) == "assistant" else str(row["role"])
+            result.append(
+                {
+                    "role": role,
+                    "text": str(row["content"]),
+                    "ts": float(row["ts"]),
+                    "route": str(row["route"] or ""),
+                    "source": str(row["source"] or ""),
+                }
+            )
+        return result
 
     def history(self, max_tokens: int | None = None) -> list[dict]:
         """Последние реплики сессии в пределах бюджета токенов (system сохраняется)."""
