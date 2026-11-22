@@ -67,7 +67,7 @@ smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
 volume_exit,reflect_sched,routine}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
-## Текущий шаг (в работе)
+## Текущий шаг (сдан, ждёт голосовой приёмки)
 Recall отвечает по конкретному вопросу: перед чтением памяти cheap-LLM
 (`task_type=intent`) извлекает `keywords/date_refs`; записи фильтруются по
 подстроке keywords и по дате, пустой фильтр сохраняет прежний обзор.
