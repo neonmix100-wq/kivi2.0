@@ -53,7 +53,7 @@ STT: локально faster-whisper large-v3-turbo, CUDA int8_float16, 0.2-0.5�
 kivi/audio/{capture,vad,recorder}; kivi/stt/{local,transcribe};
 kivi/tts/{speak,cache,stream,fillers}; kivi/brain/{router,providers,budget,
 session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
-kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search,reminders};
+kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search,reminders,recall};
 kivi/wake/{detector,loop}; kivi/runtime; kivi/main;
 kivi/api/{server,pending,client}; kivi/ui/overlay; app/ (Electron, vanilla).
 Скиллы: skills/{time_date,file_search,assistant_volume,recall,remember,reminders,tasks_list};
@@ -67,15 +67,12 @@ smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
 volume_exit,reflect_sched,routine}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
-## Текущий шаг (сдан, ждёт голосовой приёмки)
-Напоминания переведены на ISO-даты (`2026-11-23T19:00+07:00`) с миграцией
-старых epoch-записей; поддержаны сегодня/завтра/послезавтра/день недели/
-ДД.ММ, перенос 19:00 после 20:00 на завтра с явным «завтра». Без времени
-команда «напомни…» становится задачей. Recall и tasks_list показывают
-pending-напоминания (done=false, 7 дней). В UI Память добавлена вкладка
-«Напоминания» с отменой (`reminders_list`, `cancel_reminder`).
-Проверка: python tests\smoke_routine.py -> PASS; регрессии
-smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api -> PASS.
+## Текущий шаг (в работе)
+Recall отвечает по конкретному вопросу: перед чтением памяти cheap-LLM
+(`task_type=intent`) извлекает `keywords/date_refs`; записи фильтруются по
+подстроке keywords и по дате, пустой фильтр сохраняет прежний обзор.
+Проверки: `python tests\smoke_routine.py`; регрессии
+smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

@@ -7,6 +7,7 @@ triggers:
   - что у меня завтра
   - что завтра
   - во сколько мне
+  - во сколько
   - что по плану
   - какое расписание
   - что на неделе
@@ -24,7 +25,7 @@ requires:
 permissions:
   network: []
   filesystem: ["D:\\Kivi\\memory"]
-  tools: [fs_read, reminders_read]
+  tools: [fs_read, reminders_read, llm_intent]
   risk: safe
 entry: "handler.py:handle"
 enabled: true

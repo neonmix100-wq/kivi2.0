@@ -27,6 +27,7 @@ from kivi.skills.gaps import GapLog
 from kivi.skills.loader import load
 from kivi.skills.planner import Planner
 from kivi.skills.registry import SkillManifest, SkillPermissions, SkillRegistry
+from kivi.skills.recall import extract_entities
 from kivi.skills.reminders import (
     add_reminder,
     cancel_reminder,
@@ -49,6 +50,7 @@ class VaultCtx:
     def __init__(self, vault: Path) -> None:
         self.vault = vault
         self.called: list[tuple[str, tuple]] = []
+        self.logs: list[str] = []
 
     def vault_add_schedule(self, when: str, what: str) -> bool:
         self.called.append(("schedule", (when, what)))
@@ -71,7 +73,7 @@ class VaultCtx:
         return read_note(Path(name).stem, "", self.vault)
 
     def log(self, text: str) -> None:
-        return None
+        self.logs.append(str(text))
 
 
 class ReminderCtx:
@@ -96,12 +98,48 @@ class ReminderCtx:
 
 
 class RecallCtx(VaultCtx):
-    def __init__(self, vault: Path, reminders: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        vault: Path,
+        reminders: list[dict[str, Any]],
+        entities: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> None:
         super().__init__(vault)
         self._reminders = reminders
+        self.entities = entities or {"keywords": [], "date_refs": []}
+        self.now_value = now or datetime(2026, 11, 22, 18, 0, tzinfo=project_timezone())
+        self.extract_calls: list[str] = []
 
     def reminders_list(self) -> list[dict[str, Any]]:
         return list(self._reminders)
+
+    def extract_keywords(self, command: str) -> dict[str, Any]:
+        self.extract_calls.append(command)
+        return dict(self.entities)
+
+    def now(self) -> datetime:
+        return self.now_value
+
+
+class ExtractionRouter:
+    """Фейковый Router: фиксирует task_type и отдаёт JSON сущностей."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        self.task_types: list[str] = []
+        self.messages: list[dict] = []
+
+    def complete(
+        self, messages: Any, task_type: str = "chat", **_kw: Any
+    ) -> dict[str, Any]:
+        self.task_types.append(task_type)
+        self.messages = list(messages)
+        return {
+            "text": json.dumps(self.payload, ensure_ascii=False),
+            "cost_rub": 0.0,
+            "model": "scripted/extract",
+        }
 
 
 class ScriptedRouter:
@@ -363,6 +401,119 @@ def main() -> int:
         and "завтра 19:00" in tasks_reminders_reply,
     )
 
+    extract_router = ExtractionRouter(
+        {"keywords": ["мама", "позвонить"], "date_refs": []}
+    )
+    entities = extract_entities("во сколько позвонить маме", router=extract_router)
+    print("entities:", entities)
+    ok &= check(
+        "recall: LLM вызван с task_type=intent",
+        extract_router.task_types == ["intent"],
+        str(extract_router.task_types),
+    )
+    ok &= check(
+        "recall: keywords извлечены",
+        entities.keywords == ["мама", "позвонить"] and entities.date_refs == [],
+    )
+    ok &= check(
+        "recall: в промпте есть запрос",
+        bool(extract_router.messages)
+        and "во сколько позвонить маме" in extract_router.messages[-1]["content"],
+    )
+
+    recall_ctx = RecallCtx(
+        vault,
+        pending,
+        {"keywords": ["мама", "позвонить"], "date_refs": []},
+        base,
+    )
+    mama_answer = recall_handler(
+        recall_ctx, command="во сколько позвонить маме"
+    )
+    print("recall только мама:", mama_answer)
+    ok &= check(
+        "recall: вопрос про маму -> только напоминание",
+        "завтра 19:00 позвонить маме" in mama_answer
+        and "стендап" not in mama_answer.lower()
+        and "купить корм" not in mama_answer.lower(),
+        mama_answer,
+    )
+    ok &= check(
+        "recall: команда передана в извлечение",
+        recall_ctx.extract_calls == ["во сколько позвонить маме"],
+    )
+    ok &= check(
+        "recall: лог фильтрации",
+        any("recall: фильтрую по ['мама', 'позвонить']" in line for line in recall_ctx.logs),
+        " | ".join(recall_ctx.logs),
+    )
+
+    standup_answer = recall_handler(
+        RecallCtx(
+            vault,
+            pending,
+            {"keywords": ["стендап"], "date_refs": []},
+            base,
+        ),
+        command="стендап во сколько",
+    )
+    print("recall стендап:", standup_answer)
+    ok &= check(
+        "recall: стендап -> только расписание",
+        "стендап" in standup_answer.lower()
+        and "Напоминания" not in standup_answer
+        and "купить корм" not in standup_answer,
+        standup_answer,
+    )
+
+    tomorrow_answer = recall_handler(
+        RecallCtx(
+            vault,
+            pending,
+            {"keywords": [], "date_refs": ["tomorrow"]},
+            base,
+        ),
+        command="что у меня завтра",
+    )
+    print("recall завтра:", tomorrow_answer)
+    ok &= check(
+        "recall: что у меня завтра -> всё на завтра",
+        "стендап" in tomorrow_answer.lower()
+        and "завтра 19:00 позвонить маме" in tomorrow_answer
+        and "купить корм" not in tomorrow_answer,
+        tomorrow_answer,
+    )
+
+    missing_answer = recall_handler(
+        RecallCtx(
+            vault,
+            pending,
+            {"keywords": ["встреча"], "date_refs": []},
+            base,
+        ),
+        command="встреча с несуществующим",
+    )
+    print("recall не найдено:", missing_answer)
+    ok &= check(
+        "recall: не найдено -> точный ответ",
+        missing_answer == "Не нашла в твоих задачах про встречу",
+        missing_answer,
+    )
+
+    ok &= check(
+        "recall manifest разрешает llm_intent",
+        "llm_intent" in recall_manifest.permissions.tools,
+    )
+    no_llm = recall_manifest.model_copy(
+        update={"permissions": SkillPermissions(tools=["fs_read", "reminders_read"])}
+    )
+    try:
+        SkillContext(no_llm).extract_keywords("во сколько позвонить маме")
+    except PermissionDenied:
+        ok &= check("broker extract_keywords без llm_intent -> PermissionDenied", True)
+    else:
+        ok &= check("broker extract_keywords без llm_intent -> PermissionDenied", False)
+
     cancel_path = TMP / f"routine_cancel_{token}.json"
     add_reminder(
         "завтра в 19:00",
@@ -464,6 +615,12 @@ def main() -> int:
         plan_recall["skill"] is not None
         and plan_recall["skill"].name == "recall"
         and plan_recall["route"] == "skill",
+    )
+    ok &= check(
+        "planner: recall получает исходную команду",
+        plan_recall.get("args", {}).get("command")
+        == "во сколько мне позвонить маме?",
+        str(plan_recall.get("args")),
     )
 
     index_text = (PROJECT_ROOT / "app" / "renderer" / "index.html").read_text(

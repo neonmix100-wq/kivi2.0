@@ -148,9 +148,12 @@ class Planner:
             if skill_name is not None:
                 manifest = self.registry.get(skill_name)
                 if manifest is not None and manifest.enabled:
+                    plan_args = dict(args or {})
+                    if manifest.name == "recall":
+                        plan_args.setdefault("command", text)
                     return {
                         "skill": manifest,
-                        "args": dict(args or {}),
+                        "args": plan_args,
                         "missing": [],
                         "source": "llm",
                         "route": "skill",
@@ -192,9 +195,12 @@ class Planner:
         found = self.match(text)
         if found is not None:
             manifest, args = found
+            plan_args = dict(args or {})
+            if manifest.name == "recall":
+                plan_args.setdefault("command", text)
             return {
                 "skill": manifest,
-                "args": args,
+                "args": plan_args,
                 "missing": [],
                 "source": "fuzzy",
                 "route": "skill",

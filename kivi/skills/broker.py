@@ -322,6 +322,14 @@ class SkillContext:
 
         return list_reminders()
 
+    def extract_keywords(self, command: str) -> dict[str, list[str]]:
+        """LLM cheap/intent: keywords и date_refs для recall. Нужен llm_intent."""
+        self._require_tool("llm_intent")
+        from kivi.skills.recall import extract_entities
+
+        entities = extract_entities(str(command))
+        return {"keywords": entities.keywords, "date_refs": entities.date_refs}
+
     # --- безобидные методы: доступны всегда ---
 
     def notify(self, text: str) -> None:
