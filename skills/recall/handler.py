@@ -37,14 +37,22 @@ def _schedule_phrase(when: str, what: str) -> str:
 
 
 def handle(ctx, **_args) -> str:
-    """Ответить по расписанию и открытым задачам; пустой vault -> «Пока пусто.»"""
+    """Ответить по расписанию, задачам и ближайшим напоминаниям."""
     schedule = _entries(_read(ctx, "schedule.md"))
     tasks = [
         what
         for status, what in _entries(_read(ctx, "tasks.md"))
         if status.lower() == "open"
     ]
-    if not schedule and not tasks:
+    try:
+        reminders = [
+            item
+            for item in ctx.reminders_list()
+            if not item.get("done")
+        ]
+    except Exception:  # noqa: BLE001 - старый контекст/нет напоминаний
+        reminders = []
+    if not schedule and not tasks and not reminders:
         return "Пока пусто."
 
     parts: list[str] = []
@@ -57,5 +65,14 @@ def handle(ctx, **_args) -> str:
         parts.append(f"Открытых задач: {len(tasks)}.")
     else:
         parts.append("Открытых задач: 0.")
-    ctx.log(f"recall: schedule={len(schedule)}, open_tasks={len(tasks)}")
+    if reminders:
+        phrases = "; ".join(
+            f"{item.get('when_label') or item.get('ts', '')} {item.get('what', '')}".strip()
+            for item in reminders
+        )
+        parts.append(f"Напоминания: {phrases}.")
+    ctx.log(
+        f"recall: schedule={len(schedule)}, open_tasks={len(tasks)}, "
+        f"reminders={len(reminders)}"
+    )
     return " ".join(parts)

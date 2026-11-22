@@ -315,6 +315,13 @@ class SkillContext:
 
         return add_reminder(str(time), str(what))
 
+    def reminders_list(self) -> list[dict]:
+        """Ближайшие pending-напоминания. Нужен tool reminders_read."""
+        self._require_tool("reminders_read")
+        from kivi.skills.reminders import list_reminders
+
+        return list_reminders()
+
     # --- безобидные методы: доступны всегда ---
 
     def notify(self, text: str) -> None:

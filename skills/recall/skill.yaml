@@ -4,6 +4,9 @@ description: "Короткий ответ по расписанию и откр�
 category: data
 triggers:
   - что у меня сегодня
+  - что у меня завтра
+  - что завтра
+  - во сколько мне
   - что по плану
   - какое расписание
   - что на неделе
@@ -21,7 +24,7 @@ requires:
 permissions:
   network: []
   filesystem: ["D:\\Kivi\\memory"]
-  tools: [fs_read]
+  tools: [fs_read, reminders_read]
   risk: safe
 entry: "handler.py:handle"
 enabled: true

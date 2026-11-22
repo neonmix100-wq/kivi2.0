@@ -16,8 +16,8 @@ requires:
   hardware: []
 permissions:
   network: []
-  filesystem: []
-  tools: [scheduler]
+  filesystem: ["D:\\Kivi\\memory"]
+  tools: [scheduler, self_memory]
   risk: safe
 entry: "handler.py:handle"
 enabled: true

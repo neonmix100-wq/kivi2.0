@@ -10,7 +10,7 @@
     ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
     get_status, get_gaps{limit}, get_skills, set_skill_enabled{name,enabled},
     test_skill{name}, close_gap{id}, attempt_gap{id}, get_memory{kind},
-    reflect_now, tail_logs{n}, shutdown
+    reflect_now, reminders_list, cancel_reminder{id}, tail_logs{n}, shutdown
 Ответ на команду: {ok, ...}.
 
 Слушаем СТРОГО 127.0.0.1. Аутентификации нет: доступен только loopback.
@@ -482,6 +482,17 @@ class ApiServer:
             "message": str(message),
         }
 
+    def reminders_list(self) -> list[dict[str, Any]]:
+        from kivi.skills.reminders import list_reminders
+
+        return list_reminders(include_done=True, days=None)
+
+    def cancel_reminder(self, reminder_id: str) -> dict[str, Any]:
+        from kivi.skills.reminders import cancel_reminder
+
+        cancelled = cancel_reminder(str(reminder_id))
+        return {"ok": bool(cancelled), "id": str(reminder_id)}
+
     def reflect_now(self) -> dict[str, Any]:
         """Принудительная рефлексия по текущей истории (для кнопки UI)."""
         core = self._core
@@ -618,6 +629,17 @@ class ApiServer:
                     "lines": self.memory_lines(kind),
                 },
             )
+        elif command == "reminders_list":
+            await self._reply(
+                websocket,
+                {"ok": True, "reminders": self.reminders_list()},
+            )
+        elif command == "cancel_reminder":
+            reminder_id = str(message.get("id") or "").strip()
+            if not reminder_id:
+                await self._reply(websocket, {"ok": False, "error": "bad reminder id"})
+                return
+            await self._reply(websocket, self.cancel_reminder(reminder_id))
         elif command == "reflect_now":
             result = await asyncio.to_thread(self.reflect_now)
             if "ok" not in result:

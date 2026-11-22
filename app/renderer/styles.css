@@ -947,6 +947,66 @@ body.overlay-body {
   font-size: 12px;
 }
 
+.reminders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 240px;
+}
+
+.reminders-list[hidden] {
+  display: none;
+}
+
+.reminder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-2);
+}
+
+.reminder-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reminder-main strong {
+  font-size: 13px;
+}
+
+.reminder-main span {
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.reminder-status {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--muted);
+}
+
+.reminder-status.pending {
+  color: var(--accent);
+}
+
+.reminder-status.done {
+  color: var(--ok);
+}
+
+.reminder-cancel {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
 .memory-actions-bottom {
   padding-top: 10px;
 }

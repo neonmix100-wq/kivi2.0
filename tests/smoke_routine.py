@@ -27,7 +27,13 @@ from kivi.skills.gaps import GapLog
 from kivi.skills.loader import load
 from kivi.skills.planner import Planner
 from kivi.skills.registry import SkillManifest, SkillPermissions, SkillRegistry
-from kivi.skills.reminders import add_reminder, check_due
+from kivi.skills.reminders import (
+    add_reminder,
+    cancel_reminder,
+    check_due,
+    list_reminders,
+    parse_timestamp,
+)
 
 TMP = PROJECT_ROOT / "data" / "tmp"
 
@@ -64,11 +70,15 @@ class VaultCtx:
         name = Path(path).name
         return read_note(Path(name).stem, "", self.vault)
 
+    def log(self, text: str) -> None:
+        return None
+
 
 class ReminderCtx:
-    def __init__(self, path: Path, now: datetime) -> None:
+    def __init__(self, path: Path, now: datetime, vault: Path | None = None) -> None:
         self.path = path
         self.now = now
+        self.vault = vault
 
     def scheduler(self, time: str, what: str) -> str:
         return add_reminder(
@@ -78,6 +88,20 @@ class ReminderCtx:
             path=self.path,
             start_scheduler=False,
         )
+
+    def vault_add_task(self, what: str) -> bool:
+        if self.vault is None:
+            return False
+        return add_task(what, "open", path=self.vault)
+
+
+class RecallCtx(VaultCtx):
+    def __init__(self, vault: Path, reminders: list[dict[str, Any]]) -> None:
+        super().__init__(vault)
+        self._reminders = reminders
+
+    def reminders_list(self) -> list[dict[str, Any]]:
+        return list(self._reminders)
 
 
 class ScriptedRouter:
@@ -119,10 +143,17 @@ def main() -> int:
     remember_manifest = registry.get("remember")
     reminders_manifest = registry.get("reminders")
     tasks_manifest = registry.get("tasks_list")
+    recall_manifest = registry.get("recall")
     ok &= check("remember найден", remember_manifest is not None)
     ok &= check("reminders найден", reminders_manifest is not None)
     ok &= check("tasks_list найден", tasks_manifest is not None)
-    if remember_manifest is None or reminders_manifest is None or tasks_manifest is None:
+    ok &= check("recall найден", recall_manifest is not None)
+    if (
+        remember_manifest is None
+        or reminders_manifest is None
+        or tasks_manifest is None
+        or recall_manifest is None
+    ):
         print("FAIL — нет манифестов")
         return 1
 
@@ -207,6 +238,163 @@ def main() -> int:
         str(due),
     )
     ok &= check("reminder помечен done", records_after[0].get("done") is True)
+    ok &= check(
+        "ts сохранён как ISO с датой",
+        isinstance(records_after[0].get("ts"), str)
+        and "T" in records_after[0]["ts"]
+        and parse_timestamp(records_after[0]["ts"]) is not None,
+        str(records_after[0].get("ts")),
+    )
+
+    tomorrow_path = TMP / f"routine_tomorrow_{token}.json"
+    tomorrow_reply = add_reminder(
+        "завтра в 19:00",
+        "позвонить маме",
+        now=base,
+        path=tomorrow_path,
+        start_scheduler=False,
+    )
+    tomorrow_rec = json.loads(tomorrow_path.read_text(encoding="utf-8"))[0]
+    tomorrow_when = parse_timestamp(tomorrow_rec["ts"])
+    print("tomorrow reminder:", tomorrow_reply)
+    ok &= check(
+        "завтра в 19:00 -> ts завтра, не сегодня",
+        tomorrow_when is not None
+        and tomorrow_when.date() == (base + timedelta(days=1)).date()
+        and tomorrow_when.hour == 19
+        and "завтра" in tomorrow_reply.lower(),
+    )
+
+    late_path = TMP / f"routine_late_{token}.json"
+    late_now = base.replace(hour=20, minute=0)
+    late_reply = add_reminder(
+        "19:00",
+        "позвонить маме",
+        now=late_now,
+        path=late_path,
+        start_scheduler=False,
+    )
+    late_rec = json.loads(late_path.read_text(encoding="utf-8"))[0]
+    late_when = parse_timestamp(late_rec["ts"])
+    print("rolled reminder:", late_reply)
+    ok &= check(
+        "19:00 после 20:00 -> завтра и явно в ответе",
+        late_when is not None
+        and late_when.date() == (base + timedelta(days=1)).date()
+        and "завтра" in late_reply.lower(),
+        late_reply,
+    )
+
+    date_path = TMP / f"routine_date_{token}.json"
+    date_reply = add_reminder(
+        "23.11 в 19:00",
+        "дата",
+        now=base,
+        path=date_path,
+        start_scheduler=False,
+    )
+    date_when = parse_timestamp(
+        json.loads(date_path.read_text(encoding="utf-8"))[0]["ts"]
+    )
+    ok &= check(
+        "ДД.ММ -> дата 23.11",
+        date_when is not None
+        and date_when.day == 23
+        and date_when.month == 11
+        and "23.11" in date_reply,
+        date_reply,
+    )
+
+    weekday_path = TMP / f"routine_weekday_{token}.json"
+    weekday_reply = add_reminder(
+        "в понедельник в 09:00",
+        "понедельник",
+        now=base,
+        path=weekday_path,
+        start_scheduler=False,
+    )
+    weekday_when = parse_timestamp(
+        json.loads(weekday_path.read_text(encoding="utf-8"))[0]["ts"]
+    )
+    ok &= check(
+        "день недели -> следующий понедельник",
+        weekday_when is not None
+        and weekday_when.weekday() == 0
+        and "понедельник" in weekday_reply,
+        weekday_reply,
+    )
+
+    before_no_time = len(json.loads(reminders_path.read_text(encoding="utf-8")))
+    no_time_reply = reminders_handler(
+        ReminderCtx(reminders_path, base, vault),
+        time="",
+        what="купить корм",
+    )
+    after_no_time = len(json.loads(reminders_path.read_text(encoding="utf-8")))
+    print("no-time reminder:", no_time_reply)
+    ok &= check(
+        "напомни без времени -> задача, не напоминание",
+        no_time_reply == "Записала задачу: купить корм"
+        and after_no_time == before_no_time
+        and "купить корм" in read_note("tasks", "", vault),
+    )
+
+    pending = [
+        {
+            "id": "r1",
+            "when_label": "завтра 19:00",
+            "what": "позвонить маме",
+            "done": False,
+        }
+    ]
+    recall_handler = load(recall_manifest)
+    recall_reply = recall_handler(RecallCtx(vault, pending))
+    print("recall reminders:", recall_reply)
+    ok &= check(
+        "recall включает блок Напоминания",
+        "Напоминания: завтра 19:00 позвонить маме" in recall_reply,
+        recall_reply,
+    )
+    tasks_reminders_reply = tasks_handler(RecallCtx(vault, pending))
+    print("tasks с напоминаниями:", tasks_reminders_reply)
+    ok &= check(
+        "tasks_list упоминает напоминания",
+        "Напоминаний: 1" in tasks_reminders_reply
+        and "завтра 19:00" in tasks_reminders_reply,
+    )
+
+    cancel_path = TMP / f"routine_cancel_{token}.json"
+    add_reminder(
+        "завтра в 19:00",
+        "отменить меня",
+        now=base,
+        path=cancel_path,
+        start_scheduler=False,
+    )
+    cancel_id = json.loads(cancel_path.read_text(encoding="utf-8"))[0]["id"]
+    cancelled = cancel_reminder(cancel_id, path=cancel_path)
+    remaining = list_reminders(path=cancel_path, days=None)
+    ok &= check(
+        "cancel_reminder удаляет запись",
+        cancelled and remaining == [],
+        f"id={cancel_id}, осталось={len(remaining)}",
+    )
+
+    legacy_path = TMP / f"routine_legacy_{token}.json"
+    legacy_path.write_text(
+        json.dumps([{"ts": base.timestamp(), "what": "старое", "done": False}]),
+        encoding="utf-8",
+    )
+    legacy = list_reminders(
+        include_done=True, days=None, now=base, path=legacy_path
+    )
+    ok &= check(
+        "старый epoch-формат мигрирует без потери",
+        len(legacy) == 1
+        and legacy[0].get("what") == "старое"
+        and str(legacy[0].get("ts", "")).startswith("2026-11-22"),
+        str(legacy),
+    )
 
     # Брокер: без permissions.tools self_memory запись запрещена.
     plain = remember_manifest.model_copy(
@@ -229,6 +417,10 @@ def main() -> int:
                 "reminders", {"time": "19:00", "what": "позвонить маме"}
             ),
             plan_reply("tasks_list", {}),
+            plan_reply(
+                "remember", {"kind": "task", "what": "купить корм"}
+            ),
+            plan_reply("recall", {}),
         ]
     )
     planner = Planner(
@@ -240,6 +432,8 @@ def main() -> int:
     plan_remember = planner.plan("запомни стендап в 15:00")
     plan_remind = planner.plan("напомни в 19:00 позвонить")
     plan_tasks = planner.plan("мои задачи")
+    plan_no_time = planner.plan("напомни купить корм")
+    plan_recall = planner.plan("во сколько мне позвонить маме?")
     ok &= check(
         "planner: запомни -> remember",
         plan_remember["skill"] is not None
@@ -259,6 +453,18 @@ def main() -> int:
         and plan_tasks["skill"].name == "tasks_list"
         and plan_tasks["route"] == "skill",
     )
+    ok &= check(
+        "planner: напомни без времени -> remember(task)",
+        plan_no_time["skill"] is not None
+        and plan_no_time["skill"].name == "remember"
+        and plan_no_time["args"].get("kind") == "task",
+    )
+    ok &= check(
+        "planner: во сколько мне -> recall",
+        plan_recall["skill"] is not None
+        and plan_recall["skill"].name == "recall"
+        and plan_recall["route"] == "skill",
+    )
 
     index_text = (PROJECT_ROOT / "app" / "renderer" / "index.html").read_text(
         encoding="utf-8"
@@ -269,9 +475,16 @@ def main() -> int:
     ok &= check("UI skills section есть", 'id="skills-list"' in index_text)
     ok &= check("UI gaps section есть", 'id="gaps-body"' in index_text)
     ok &= check("UI schedule form есть", 'id="schedule-form"' in index_text)
+    ok &= check("UI reminders view есть", 'id="reminders-view"' in index_text)
     ok &= check(
-        "UI JS загружает скиллы/пробелы",
-        "function loadSkills" in app_js and "function loadGaps" in app_js,
+        "UI reminders tab есть",
+        'data-kind="reminders"' in index_text,
+    )
+    ok &= check(
+        "UI JS загружает скиллы/пробелы/напоминания",
+        "function loadSkills" in app_js
+        and "function loadGaps" in app_js
+        and "function loadReminders" in app_js,
     )
 
     print()

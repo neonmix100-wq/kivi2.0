@@ -41,6 +41,7 @@ const ui = {
   customPreview: $('#custom-preview'),
   memoryList: $('#memory-list'),
   memoryState: $('#memory-state'),
+  remindersView: $('#reminders-view'),
   skillsList: $('#skills-list'),
   skillsState: $('#skills-state'),
   gapsBody: $('#gaps-body'),
@@ -301,6 +302,63 @@ function setMemoryState(text) {
   if (ui.memoryState) ui.memoryState.textContent = text;
 }
 
+function renderReminders(items) {
+  if (!ui.remindersView) return;
+  ui.remindersView.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'Напоминаний нет.';
+    ui.remindersView.append(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'reminder-row';
+    const main = document.createElement('div');
+    main.className = 'reminder-main';
+    const when = document.createElement('strong');
+    when.textContent = item.when_label || item.ts || '—';
+    const text = document.createElement('span');
+    text.textContent = item.what || '—';
+    main.append(when, text);
+    const status = document.createElement('span');
+    status.className = `reminder-status ${item.done ? 'done' : 'pending'}`;
+    status.textContent = item.done ? 'выполнено' : 'ожидает';
+    const cancel = document.createElement('button');
+    cancel.className = 'ghost-btn reminder-cancel';
+    cancel.textContent = 'Отменить';
+    cancel.disabled = Boolean(item.done);
+    cancel.addEventListener('click', () => {
+      request('cancel_reminder', { id: item.id })
+        .then((reply) => {
+          setMemoryState(reply.ok ? 'напоминание отменено' : 'не удалось отменить');
+          loadReminders();
+        })
+        .catch(() => setMemoryState('нет связи с ядром'));
+    });
+    row.append(main, status, cancel);
+    ui.remindersView.append(row);
+  });
+}
+
+function loadReminders() {
+  if (!ui.remindersView) return;
+  ui.remindersView.textContent = 'Загружаю…';
+  setMemoryState('');
+  request('reminders_list')
+    .then((reply) => {
+      const items = Array.isArray(reply.reminders) ? reply.reminders : [];
+      renderReminders(items);
+      const pending = items.filter((item) => !item.done).length;
+      setMemoryState(`напоминаний: ${items.length}, ожидают: ${pending}`);
+    })
+    .catch((error) => {
+      ui.remindersView.textContent = 'Нет связи с ядром.';
+      setMemoryState(`ошибка: ${error.message || error}`);
+    });
+}
+
 function loadMemory(kind = memoryKind) {
   memoryKind = kind || 'profile';
   $$('.memory-tab').forEach((tab) => {
@@ -308,6 +366,14 @@ function loadMemory(kind = memoryKind) {
   });
   if (ui.scheduleForm && memoryKind !== 'schedule') ui.scheduleForm.hidden = true;
   if (ui.scheduleAdd) ui.scheduleAdd.hidden = memoryKind !== 'schedule';
+  if (memoryKind === 'reminders') {
+    if (ui.memoryList) ui.memoryList.hidden = true;
+    if (ui.remindersView) ui.remindersView.hidden = false;
+    loadReminders();
+    return;
+  }
+  if (ui.memoryList) ui.memoryList.hidden = false;
+  if (ui.remindersView) ui.remindersView.hidden = true;
   if (!ui.memoryList) return;
   ui.memoryList.textContent = 'Загружаю…';
   setMemoryState('');

@@ -68,12 +68,12 @@ opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
 volume_exit,reflect_sched,routine}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Прямые рутинные команды: `remember` пишет schedule/task/preference/fact через
-брокер (`self_memory`), `reminders` хранит `data/reminders.json` и озвучивает
-due-записи фоновым потоком раз в 30 с, `tasks_list` читает open-задачи.
-Планировщик маршрутизирует «запомни/напомни/мои задачи» в эти скиллы.
-UI: Скиллы со статистикой/тумблером/тестом, Пробелы с закрытием и попыткой
-GapCloser, в Расписании кнопка «Добавить событие» (форма-заглушка).
+Напоминания переведены на ISO-даты (`2026-11-23T19:00+07:00`) с миграцией
+старых epoch-записей; поддержаны сегодня/завтра/послезавтра/день недели/
+ДД.ММ, перенос 19:00 после 20:00 на завтра с явным «завтра». Без времени
+команда «напомни…» становится задачей. Recall и tasks_list показывают
+pending-напоминания (done=false, 7 дней). В UI Память добавлена вкладка
+«Напоминания» с отменой (`reminders_list`, `cancel_reminder`).
 Проверка: python tests\smoke_routine.py -> PASS; регрессии
 smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api -> PASS.
 
