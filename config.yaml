@@ -44,6 +44,8 @@ memory:
   vault_path: "memory"
   reflect_every_turns: 20
   reflect_on_idle_min: 10
+  reflect_check_s: 60
+  reflect_min_interval_s: 300
   retrieve_k: 4
   embed_model: "baai/bge-m3"
 

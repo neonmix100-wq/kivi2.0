@@ -3,7 +3,7 @@
 События (core -> clients):
     status{state,budget_used,volume,window_open}
     ask{id,question,options}, confirm{id,title,body,details}
-    info{text}, log{line} (хвост лога, уровень>=INFO, кольцо 200 строк)
+    info{text}, log{line,level} (хвост лога, уровень>=INFO, кольцо 200 строк)
 
 Команды (clients -> core):
     ask{question,options}, confirm{title,body,details}, info{text},
@@ -52,6 +52,7 @@ DEFAULT_PORT = 8765
 DEFAULT_ASK_TIMEOUT_S = 60.0
 DEFAULT_CONFIRM_TIMEOUT_S = 120.0
 LOG_RING_SIZE = 200
+CLIENT_QUEUE_LIMIT = 200
 
 
 class ApiConfig(BaseModel):
@@ -107,6 +108,7 @@ class ApiServer:
         self.port = int(port if port is not None else parsed.port)
         self._core = core
         self._clients: set[Any] = set()
+        self._queues: dict[Any, asyncio.Queue[str]] = {}
         self._clients_lock = threading.Lock()
         self._ring: deque[str] = deque(maxlen=LOG_RING_SIZE)
         self._ring_lock = threading.Lock()
@@ -167,9 +169,13 @@ class ApiServer:
         line = str(message).rstrip()
         if not line:
             return
+        try:
+            level = str(message.record["level"].name)
+        except Exception:  # noqa: BLE001 - sink может получить не Message
+            level = "INFO"
         with self._ring_lock:
             self._ring.append(line)
-        self.broadcast({"event": "log", "line": line})
+        self.broadcast({"event": "log", "level": level, "line": line})
 
     def start(self, *, timeout: float = 5.0) -> "ApiServer":
         """Поднять сервер и дождаться готовности (не дольше timeout)."""
@@ -223,6 +229,7 @@ class ApiServer:
                 pass
         with self._clients_lock:
             self._clients.clear()
+            self._queues.clear()
         if self._stopped is not None:
             self._stopped.set()
 
@@ -253,19 +260,48 @@ class ApiServer:
         if not clients or loop is None or not loop.is_running():
             return False
         payload = json.dumps(event, ensure_ascii=False)
+        level = str(event.get("level") or "").upper()
+        skip_if_full = event.get("event") == "log" and level not in (
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        )
         try:
-            asyncio.run_coroutine_threadsafe(self._send_all(payload), loop)
+            asyncio.run_coroutine_threadsafe(
+                self._enqueue_all(payload, skip_if_full=skip_if_full), loop
+            )
         except RuntimeError:
             return False
         return True
 
-    async def _send_all(self, payload: str) -> None:
-        for websocket in list(self._clients):
+    async def _enqueue_all(self, payload: str, *, skip_if_full: bool) -> None:
+        """Разложить событие по очередям клиентов (INFO при переполнении режем)."""
+        with self._clients_lock:
+            queues = list(self._queues.values())
+        for queue in queues:
+            if skip_if_full and queue.qsize() > CLIENT_QUEUE_LIMIT:
+                continue
             try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:  # запасной случай, очередь без maxsize
+                continue
+
+    async def _writer(self, websocket: Any, queue: asyncio.Queue[str]) -> None:
+        """Единственный писатель клиента: сериализует send и не блокирует broadcast."""
+        try:
+            while True:
+                payload = await queue.get()
                 await websocket.send(payload)
-            except Exception:  # noqa: BLE001 - мёртвый клиент убираем
-                with self._clients_lock:
-                    self._clients.discard(websocket)
+        except ConnectionClosed:
+            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - мёртвый клиент убираем
+            logger.debug("api: клиент отключён при отправке: {}", exc)
+            try:
+                await websocket.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def status(self) -> dict[str, Any]:
         """Снимок состояния ядра для события/команды status."""
@@ -345,19 +381,32 @@ class ApiServer:
             logger.warning("api: клиент {} не loopback — закрываю", peer_host)
             await websocket.close()
             return
+        queue: asyncio.Queue[str] = asyncio.Queue()
         with self._clients_lock:
             self._clients.add(websocket)
+            self._queues[websocket] = queue
+        writer: asyncio.Task[None] | None = None
         try:
             await websocket.send(
                 json.dumps({"event": "status", **self.status()}, ensure_ascii=False)
             )
+            writer = asyncio.create_task(self._writer(websocket, queue))
             async for raw in websocket:
                 await self._handle_message(websocket, raw)
         except ConnectionClosed:
             pass
         finally:
+            if writer is not None:
+                writer.cancel()
+                try:
+                    await writer
+                except (asyncio.CancelledError, ConnectionClosed):
+                    pass
+                except Exception:  # noqa: BLE001 - закрытие writer не критично
+                    pass
             with self._clients_lock:
                 self._clients.discard(websocket)
+                self._queues.pop(websocket, None)
 
     async def _reply(self, websocket: Any, payload: dict[str, Any]) -> None:
         try:

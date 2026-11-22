@@ -10,17 +10,33 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from kivi.config import get_settings
 from kivi.log import logger
 from kivi.memory.vault import add_fact, read_note, vault_root, write_note
 
-__all__ = ["MIN_INTERVAL_S", "REFLECT_PROMPT", "Reflector"]
+__all__ = [
+    "DEFAULT_REFLECT_CHECK_S",
+    "DEFAULT_REFLECT_IDLE_MIN_S",
+    "DEFAULT_REFLECT_MIN_INTERVAL_S",
+    "MIN_INTERVAL_S",
+    "REFLECT_PROMPT",
+    "ReflectScheduler",
+    "Reflector",
+    "start_reflect_scheduler",
+    "stop_reflect_scheduler",
+]
 
 MIN_INTERVAL_S = 300.0  # не чаще раза в 5 минут
+DEFAULT_REFLECT_CHECK_S = 60.0
+DEFAULT_REFLECT_IDLE_MIN_S = 600.0
+DEFAULT_REFLECT_MIN_INTERVAL_S = 300.0
 MAX_DIALOG_CHARS = 6000
 
 REFLECT_PROMPT = (
@@ -231,3 +247,218 @@ class Reflector:
             if len(sentences) >= 6:
                 break
         return " ".join(sentences[:6])
+
+
+class ReflectScheduler:
+    """Фоновый планировщик рефлексии: ровно один поток, проверка раз в N секунд.
+
+    Условия прохода:
+      * есть реплики текущей сессии с ts > last_reflected_ts;
+      * простой диалога больше reflect_on_idle_min;
+      * с прошлого прохода прошло не меньше reflect_min_interval_s.
+    Иначе — тихий пропуск без INFO-логов (чтобы не спамить лог).
+    """
+
+    def __init__(
+        self,
+        reflector: Any,
+        session: Any,
+        *,
+        settings: Any | None = None,
+        check_s: float | None = None,
+        min_interval_s: float | None = None,
+        idle_min_s: float | None = None,
+        clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] | None = None,
+        sleep_fn: Callable[[float], bool | None] | None = None,
+        on_success: Callable[[float], None] | None = None,
+    ) -> None:
+        memory_cfg = {}
+        if settings is not None:
+            memory_cfg = settings.section("memory")
+        else:
+            try:
+                memory_cfg = get_settings().section("memory")
+            except Exception:  # noqa: BLE001 - планировщик должен жить и без аудио
+                memory_cfg = {}
+        self.reflector = reflector
+        self.session = session
+        self.check_s = max(
+            1.0,
+            float(
+                check_s
+                if check_s is not None
+                else (memory_cfg.get("reflect_check_s") or DEFAULT_REFLECT_CHECK_S)
+            ),
+        )
+        self.min_interval_s = max(
+            1.0,
+            float(
+                min_interval_s
+                if min_interval_s is not None
+                else (
+                    memory_cfg.get("reflect_min_interval_s")
+                    or DEFAULT_REFLECT_MIN_INTERVAL_S
+                )
+            ),
+        )
+        self.idle_min_s = max(
+            1.0,
+            float(
+                idle_min_s
+                if idle_min_s is not None
+                else (memory_cfg.get("reflect_on_idle_min") or 10) * 60.0
+            ),
+        )
+        self._clock = clock or time.monotonic
+        self._wall_clock = wall_clock or time.time
+        self._sleep_fn = sleep_fn
+        self._on_success = on_success
+        self.last_reflected_ts = 0.0
+        self.checks = 0
+        self._last_run_mono: float | None = None
+        self._stop = threading.Event()
+        self._started = False
+        self._thread: threading.Thread | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def check_once(self) -> bool:
+        """Одна проверка. True — рефлексия выполнена и last_reflected_ts обновлён."""
+        self.checks += 1
+        try:
+            messages, max_ts = self.session.messages_since(
+                self.last_reflected_ts, max_tokens=3000
+            )
+            last_activity = float(self.session.last_activity_ts())
+        except Exception as exc:  # noqa: BLE001 - память не должна ронять цикл
+            logger.warning(
+                "Reflect scheduler: история недоступна: {}: {}",
+                type(exc).__name__,
+                exc,
+            )
+            return False
+        if not messages:
+            return False
+        idle_seconds = self._wall_clock() - last_activity
+        if idle_seconds <= self.idle_min_s:
+            return False
+        now = float(self._clock())
+        if (
+            self._last_run_mono is not None
+            and now - self._last_run_mono < self.min_interval_s
+        ):
+            return False
+
+        # Фиксируем попытку до вызова: даже ошибка LLM не должна приводить
+        # к повторной попытке на каждой проверке (спам и лишние расходы).
+        self._last_run_mono = now
+        try:
+            stats = self.reflector.run(messages)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Reflect scheduler: проход упал: {}: {}", type(exc).__name__, exc
+            )
+            return False
+        if not isinstance(stats, dict) or stats.get("skipped"):
+            return False
+
+        self.last_reflected_ts = max(self.last_reflected_ts, float(max_ts))
+        if self._on_success is not None:
+            try:
+                self._on_success(self.last_reflected_ts)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Reflect scheduler: on_success упал: {}", exc)
+        return True
+
+
+    def _loop(self) -> None:
+        sleeper = self._sleep_fn or self._stop.wait
+        while not self._stop.is_set():
+            try:
+                self.check_once()
+            except Exception as exc:  # noqa: BLE001 - планировщик не должен умирать
+                logger.warning(
+                    "Reflect scheduler: проверка упала: {}: {}",
+                    type(exc).__name__,
+                    exc,
+                )
+            try:
+                stopped = sleeper(self.check_s)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Reflect scheduler: sleep упал: {}", exc)
+                stopped = self._stop.wait(self.check_s)
+            if stopped:
+                break
+
+    def start(self) -> threading.Thread:
+        """Запустить поток; повторный старт игнорируется с WARNING."""
+        if self._started:
+            logger.warning(
+                "Reflect scheduler: уже запущен — повторный старт проигнорирован"
+            )
+            assert self._thread is not None
+            return self._thread
+        self._started = True
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="kivi-reflect-scheduler",
+            daemon=True,
+        )
+        self._thread.start()
+        return self._thread
+
+    def stop(self, timeout: float = 3.0) -> None:
+        """Остановить планировщик и дождаться потока (если он не текущий)."""
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(max(0.1, float(timeout)))
+        self._started = False
+
+
+# --- модульный singleton: в процессе ровно один планировщик ---
+
+_scheduler_lock = threading.Lock()
+_started = False
+_scheduler: ReflectScheduler | None = None
+
+
+def start_reflect_scheduler(
+    reflector: Any,
+    session: Any,
+    **kwargs: Any,
+) -> ReflectScheduler:
+    """Запустить единственный планировщик; повторный вызов — WARNING."""
+    global _started, _scheduler
+    with _scheduler_lock:
+        if _started:
+            logger.warning(
+                "Reflect scheduler: уже запущен — повторный старт проигнорирован"
+            )
+            assert _scheduler is not None
+            return _scheduler
+        scheduler = ReflectScheduler(reflector, session, **kwargs)
+        try:
+            scheduler.start()
+        except Exception:
+            _scheduler = None
+            _started = False
+            raise
+        _scheduler = scheduler
+        _started = True
+        return scheduler
+
+
+def stop_reflect_scheduler(timeout: float = 3.0) -> None:
+    """Остановить singleton-планировщик (для выхода и тестов)."""
+    global _started, _scheduler
+    with _scheduler_lock:
+        scheduler = _scheduler
+        if scheduler is not None:
+            scheduler.stop(timeout=timeout)
+        _scheduler = None
+        _started = False

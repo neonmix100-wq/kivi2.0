@@ -63,18 +63,22 @@ data/logs/kivi.log.
 
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
-opencode,flow,dialogue,search_context,tts_stream,memory,api,volume_exit};
-level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+opencode,flow,dialogue,search_context,tts_stream,memory,api,volume_exit,
+reflect_sched}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Electron-каркас в app/: главное окно 1160x760 (кастомный тайтлбар, сайдбар,
-темы/шрифты, логи, громкость), оверлей-пилюля снизу справа с карточками
-ask/confirm и тостом info. Ядро запускается дочерним процессом только если
-порт 8765 свободен; при закрытии главного окна приложение останавливает
-своё ядро, но не трогает ядро, запущенное вручную. Python-путь: kivi/api/*,
-kivi/ui/overlay.py, tests/api_ask_demo.py.
-Проверка: cd app; npm start -> окна; затем python tests\api_ask_demo.py ->
-карточка в оверлее, ответ кликом в консоли.
+Планировщик рефлексии вынесен в отдельный поток `ReflectScheduler`:
+проверка раз в `memory.reflect_check_s: 60`, сон между проверками, запуск
+только при репликах с `ts > last_reflected_ts` и простое больше
+`reflect_on_idle_min`; не чаще `reflect_min_interval_s: 300`, после успеха
+`last_reflected_ts` обновляется. Повторный старт игнорируется с WARNING
+(модульный флаг `_started`). В API ядро теперь имеет per-client очередь
+отправки: при переполнении >200 сообщений INFO-строки пропускаются,
+WARNING/ERROR всегда доходят. Голосовой тракт, router и budget не менялись.
+Проверка: python tests\smoke_reflect_sched.py -> PASS; регрессии
+smoke_memory, smoke_flow, smoke_dialogue, smoke_api -> PASS. 10 минут
+простоя живого ядра: в логе только строка запуска планировщика и финальная
+`reflection завершён`, повторов рефлексии нет.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

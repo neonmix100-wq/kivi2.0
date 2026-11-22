@@ -179,6 +179,64 @@ class Session:
         result.extend({"role": role, "content": content} for role, content in selected)
         return result
 
+    def messages_since(
+        self,
+        since_ts: float,
+        *,
+        max_tokens: int | None = None,
+    ) -> tuple[list[dict], float]:
+        """Реплики текущей сессии с ts > since_ts и максимальный ts.
+
+        Не вызывает _refresh_if_idle: планировщик рефлексии проверяет сессию
+        ровно в момент простоя, когда авто-переход на новую сессию уже не нужен.
+        System-реплики в диалог рефлексии не попадают.
+        """
+        if self._session_id is None:
+            self._open_or_start()
+        limit = int(max_tokens if max_tokens is not None else self.max_tokens)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT role, content, ts FROM messages "
+                "WHERE session_id = ? AND ts > ? ORDER BY ts ASC, id ASC",
+                (self._session_id, float(since_ts)),
+            ).fetchall()
+
+        dialogue = [row for row in rows if row["role"] != "system"]
+        if not dialogue:
+            return [], float(since_ts)
+        max_ts = max(float(row["ts"]) for row in dialogue)
+
+        budget = limit
+        selected: list[tuple[str, str]] = []
+        for row in reversed(dialogue):
+            content = str(row["content"])
+            cost = count_tokens(content)
+            if cost > budget:
+                if not selected and budget > 0:
+                    keep_chars = max(40, budget * 3)
+                    selected.append((str(row["role"]), "…" + content[-keep_chars:]))
+                    budget = 0
+                break
+            selected.append((str(row["role"]), content))
+            budget -= cost
+        selected.reverse()
+        return (
+            [{"role": role, "content": content} for role, content in selected],
+            max_ts,
+        )
+
+    def last_activity_ts(self) -> float:
+        """Время последней реплики (без запуска новой сессии)."""
+        if self._last_activity:
+            return float(self._last_activity)
+        if self._session_id is None:
+            return 0.0
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT last_ts FROM sessions WHERE id = ?", (self._session_id,)
+            ).fetchone()
+        return float(row["last_ts"]) if row is not None else 0.0
+
     def clear(self) -> None:
         """Начать новую сессию (старые сообщения остаются в БД)."""
         self._new_session()

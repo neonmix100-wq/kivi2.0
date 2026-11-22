@@ -239,13 +239,21 @@ class WakeLoop:
         self._turns_since_reflect = 0
         self._last_activity_ts = time.time()
         self._idle_threshold_s = float(memory_cfg.get("reflect_on_idle_min") or 10) * 60.0
+        self._reflect_check_s = float(memory_cfg.get("reflect_check_s") or 60.0)
+        self._reflect_min_interval_s = float(
+            memory_cfg.get("reflect_min_interval_s") or 300.0
+        )
         self.reflector = None
         self._reflect_thread: threading.Thread | None = None
+        self.reflect_scheduler: Any | None = None
+        self._last_reflected_ts = 0.0
         if self.memory_enabled:
             try:
                 from kivi.memory.reflect import Reflector
 
-                self.reflector = Reflector(router)
+                self.reflector = Reflector(
+                    router, min_interval_s=self._reflect_min_interval_s
+                )
             except Exception as exc:  # noqa: BLE001 - память не должна блокировать запуск
                 logger.warning("Память: рефлексия недоступна: {}", exc)
 
@@ -283,6 +291,7 @@ class WakeLoop:
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_reflect_scheduler()
         speaker = self._speaker
         if speaker is not None:
             try:
@@ -360,6 +369,7 @@ class WakeLoop:
             samplerate,
             self.capture.block_frames,
         )
+        self._start_reflect_scheduler()
 
         try:
             while not self._stop.is_set():
@@ -401,16 +411,10 @@ class WakeLoop:
 
                 self._expire_window()
 
-                # Простой: если давно молчим и есть необработанные реплики — рефлексия.
-                idle_seconds = time.time() - self._last_activity_ts
-                if (
-                    self._turns_since_reflect
-                    and idle_seconds >= self._idle_threshold_s
-                ):
-                    self._maybe_reflect(idle_seconds=idle_seconds)
         except KeyboardInterrupt:
             wake_log.info("остановка по Ctrl+C")
         finally:
+            self._stop_reflect_scheduler()
             self.capture.stop()
             if self.recorder.is_recording:
                 self.recorder.cancel()
@@ -874,42 +878,80 @@ class WakeLoop:
         return block
 
     def _note_turn(self) -> None:
-        """Учесть реплику и, если пора, запустить рефлексию в фоне."""
+        """Учесть реплику; саму рефлексию запускает отдельный планировщик."""
         with self._memory_lock:
             self._turns_since_reflect += 1
         self._last_activity_ts = time.time()
-        self._maybe_reflect()
 
-    def _maybe_reflect(self, *, idle_seconds: float = 0.0) -> None:
-        if self.reflector is None:
+    def _start_reflect_scheduler(self) -> None:
+        """Запустить единственный фоновый планировщик рефлексии."""
+        if self.reflector is None or self.reflect_scheduler is not None:
             return
+        try:
+            from kivi.memory.reflect import start_reflect_scheduler
+
+            self.reflect_scheduler = start_reflect_scheduler(
+                self.reflector,
+                self._get_session(),
+                settings=self.settings,
+                on_success=self._on_reflected,
+            )
+            wake_log.info(
+                "память: планировщик рефлексии запущен (проверка {:.0f} c)",
+                self._reflect_check_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - память не должна блокировать голос
+            wake_log.warning("память: планировщик рефлексии не запущен: {}", exc)
+
+    def _stop_reflect_scheduler(self) -> None:
+        """Остановить планировщик; ссылка остаётся для last_reflected_ts."""
+        scheduler = self.reflect_scheduler
+        if scheduler is None:
+            return
+        try:
+            scheduler.stop(timeout=3.0)
+        except Exception as exc:  # noqa: BLE001
+            wake_log.debug("память: остановка планировщика: {}", exc)
+        try:
+            from kivi.memory.reflect import stop_reflect_scheduler
+
+            stop_reflect_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            wake_log.debug("память: сброс singleton планировщика: {}", exc)
+
+    def _on_reflected(self, reflected_ts: float) -> None:
+        """Планировщик успешно завершил проход: сбросить счётчик финальной рефлексии."""
         with self._memory_lock:
-            turns = self._turns_since_reflect
-        if not self.reflector.should_run(turns_since=turns, idle_seconds=idle_seconds):
-            return
-        if self._reflect_thread is not None and self._reflect_thread.is_alive():
-            wake_log.debug("память: рефлексия уже идёт")
-            return
-        messages = self._get_session().history(max_tokens=3000)
-        self._reflect_thread = threading.Thread(
-            target=self._reflect_job,
-            args=(messages, turns),
-            name="kivi-reflect",
-            daemon=True,
-        )
-        self._reflect_thread.start()
+            self._turns_since_reflect = 0
+        self._last_reflected_ts = max(self._last_reflected_ts, float(reflected_ts))
 
-    def _reflect_job(self, messages: list[dict], turns: int) -> None:
+    def _reflect_job(
+        self,
+        messages: list[dict],
+        turns: int,
+        up_to_ts: float | None = None,
+    ) -> None:
         try:
             stats = self.reflector.run(messages)
         except Exception as exc:  # noqa: BLE001 - рефлексия не должна ронять поток
             wake_log.warning("память: рефлексия упала: {}", exc)
+            return
+        if not isinstance(stats, dict):
+            wake_log.warning("память: рефлексия вернула не словарь")
             return
         if stats.get("skipped"):
             wake_log.info("память: рефлексия пропущена ({})", stats["skipped"])
             return
         with self._memory_lock:
             self._turns_since_reflect = max(0, self._turns_since_reflect - turns)
+        if up_to_ts:
+            self._last_reflected_ts = max(self._last_reflected_ts, float(up_to_ts))
+            scheduler = self.reflect_scheduler
+            if scheduler is not None:
+                scheduler.last_reflected_ts = max(
+                    float(getattr(scheduler, "last_reflected_ts", 0.0)),
+                    float(up_to_ts),
+                )
         wake_log.info(
             "память: фактов {}, решений {}, стоимость {:.5f} руб",
             stats["facts"],
@@ -925,17 +967,53 @@ class WakeLoop:
         if self.reflector is None:
             return True
 
-        thread = self._reflect_thread
-        if thread is None or not thread.is_alive():
-            with self._memory_lock:
-                turns = self._turns_since_reflect
-            if turns <= 0:
+        scheduler = getattr(self, "reflect_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.stop(timeout=min(1.0, max(0.1, float(timeout))))
+            except Exception as exc:  # noqa: BLE001
+                wake_log.debug("память: остановка планировщика: {}", exc)
+            scheduler_thread = getattr(scheduler, "_thread", None)
+            if scheduler_thread is not None and scheduler_thread.is_alive():
+                scheduler_thread.join(max(0.1, float(timeout)))
+                if scheduler_thread.is_alive():
+                    wake_log.warning("reflection прерван по таймауту")
+                    return False
                 wake_log.info("reflection завершён")
                 return True
-            messages = self._get_session().history(max_tokens=3000)
+
+        thread = self._reflect_thread
+        if thread is None or not thread.is_alive():
+            session = self._get_session()
+            messages: list[dict] = []
+            max_ts = 0.0
+            if hasattr(session, "messages_since"):
+                since = max(
+                    float(getattr(scheduler, "last_reflected_ts", 0.0)),
+                    float(self._last_reflected_ts),
+                )
+                try:
+                    messages, max_ts = session.messages_since(
+                        since, max_tokens=3000
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    wake_log.warning("память: финальная история недоступна: {}", exc)
+                if not messages:
+                    wake_log.info("reflection завершён")
+                    return True
+                with self._memory_lock:
+                    turns = max(1, self._turns_since_reflect)
+            else:
+                with self._memory_lock:
+                    turns = self._turns_since_reflect
+                if turns <= 0:
+                    wake_log.info("reflection завершён")
+                    return True
+                messages = session.history(max_tokens=3000)
+
             thread = threading.Thread(
                 target=self._reflect_job,
-                args=(messages, turns),
+                args=(messages, turns, max_ts),
                 name="kivi-reflect-stop",
                 daemon=True,
             )
