@@ -53,10 +53,10 @@ STT: локально faster-whisper large-v3-turbo, CUDA int8_float16, 0.2-0.5�
 kivi/audio/{capture,vad,recorder}; kivi/stt/{local,transcribe};
 kivi/tts/{speak,cache,stream,fillers}; kivi/brain/{router,providers,budget,
 session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
-kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search};
+kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search,reminders};
 kivi/wake/{detector,loop}; kivi/runtime; kivi/main;
 kivi/api/{server,pending,client}; kivi/ui/overlay; app/ (Electron, vanilla).
-Скиллы: skills/{time_date,file_search,assistant_volume,recall};
+Скиллы: skills/{time_date,file_search,assistant_volume,recall,remember,reminders,tasks_list};
 skills/installed/ (gitignore).
 Данные: data/kivi.db (usage, capability_gaps, messages), data/skills.db,
 data/models, data/tts_cache, data/opencode_jobs, memory/ (Obsidian-vault),
@@ -65,19 +65,17 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Память расширена: `memory/schedule.md` (`[when] what`), `memory/tasks.md`
-(`[open|done] what`), предпочтения пишутся в `profile.md`. Reflection
-извлекает `facts/schedule/tasks/preferences`, дедуплицирует строки, `done`
-закрывает существующую open-задачу. `retrieve` подмешивает schedule/tasks
-по ключевым словам и пишет лог «память: подобрано видов N». Добавлен
-builtin-скилл `skills/recall` с доступом только к `D:\Kivi\memory`.
-В приложении секция Память: вкладки Профиль/Расписание/Задачи/Темы/Люди,
-«Обновить» и «Извлечь сейчас» (`reflect_now` в API).
-Проверка: python tests\smoke_memory_deep.py -> PASS; регрессии
-smoke_memory, smoke_flow, smoke_dialogue, smoke_api -> PASS.
+Прямые рутинные команды: `remember` пишет schedule/task/preference/fact через
+брокер (`self_memory`), `reminders` хранит `data/reminders.json` и озвучивает
+due-записи фоновым потоком раз в 30 с, `tasks_list` читает open-задачи.
+Планировщик маршрутизирует «запомни/напомни/мои задачи» в эти скиллы.
+UI: Скиллы со статистикой/тумблером/тестом, Пробелы с закрытием и попыткой
+GapCloser, в Расписании кнопка «Добавить событие» (форма-заглушка).
+Проверка: python tests\smoke_routine.py -> PASS; регрессии
+smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api -> PASS.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

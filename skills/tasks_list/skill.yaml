@@ -1,0 +1,27 @@
+name: tasks_list
+version: "1.0.0"
+description: "Открытые задачи из памяти"
+category: data
+triggers:
+  - мои задачи
+  - что нужно сделать
+  - список дел
+intents:
+  - показать открытые задачи
+  - список дел
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: ["D:\\Kivi\\memory"]
+  tools: [fs_read]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

@@ -110,6 +110,13 @@ def _run(*, enable_api: bool = True) -> int:
             logger.warning("Память: не удалось подготовить vault: {}", exc)
 
     loop = WakeLoop(settings=settings, router=router, session=Session())
+    try:
+        from kivi.skills.reminders import ensure_scheduler, stop_scheduler
+
+        ensure_scheduler()
+        register_cleanup(stop_scheduler)
+    except Exception as exc:  # noqa: BLE001 - напоминания не должны мешать голосу
+        logger.warning("напоминания: scheduler не запущен: {}: {}", type(exc).__name__, exc)
     register_cleanup(loop.stop)  # WakeLoop + AudioCapture
     register_cleanup(stop.set)  # сначала просим цикл выйти
 

@@ -8,7 +8,9 @@
 Команды (clients -> core):
     ask{question,options}, confirm{title,body,details}, info{text},
     ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
-    get_status, get_gaps{limit}, get_memory{kind}, reflect_now, tail_logs{n}, shutdown
+    get_status, get_gaps{limit}, get_skills, set_skill_enabled{name,enabled},
+    test_skill{name}, close_gap{id}, attempt_gap{id}, get_memory{kind},
+    reflect_now, tail_logs{n}, shutdown
 Ответ на команду: {ok, ...}.
 
 Слушаем СТРОГО 127.0.0.1. Аутентификации нет: доступен только loopback.
@@ -416,6 +418,70 @@ class ApiServer:
             items.append({"name": name, "text": text[:2000]})
         return items
 
+    def _skill_registry(self):
+        """Реестр скиллов из ядра или общий (для UI)."""
+        core = self._core
+        registry = getattr(core, "skills", None)
+        if registry is not None:
+            return registry
+        from kivi.skills.registry import get_registry
+
+        return get_registry()
+
+    def skills_payload(self) -> list[dict[str, Any]]:
+        """Список скиллов со статистикой для UI."""
+        registry = self._skill_registry()
+        items: list[dict[str, Any]] = []
+        for manifest in registry.list_all():
+            stats = registry.stats(manifest.name)
+            items.append(
+                {
+                    "name": manifest.name,
+                    "description": manifest.description,
+                    "category": manifest.category,
+                    "enabled": bool(manifest.enabled),
+                    "use_count": int(stats.use_count) if stats is not None else 0,
+                    "success_count": int(stats.success_count) if stats is not None else 0,
+                    "fail_count": int(stats.fail_count) if stats is not None else 0,
+                }
+            )
+        return items
+
+    def set_skill_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        registry = self._skill_registry()
+        ok = registry.enable(name) if enabled else registry.disable(name)
+        return {"ok": bool(ok), "name": name, "enabled": bool(enabled)}
+
+    def test_skill(self, name: str) -> dict[str, Any]:
+        manifest = self._skill_registry().get(name)
+        if manifest is None:
+            return {"ok": False, "error": f"скилл {name!r} не найден"}
+        return {"ok": True, "name": name, "message": f"Тест «{name}»: заглушка"}
+
+    def close_gap(self, gap_id: int) -> dict[str, Any]:
+        from kivi.skills.gaps import get_gap_log
+
+        closed = get_gap_log().close(int(gap_id), how="manual", notes="закрыто в UI")
+        return {"ok": bool(closed), "id": int(gap_id)}
+
+    def attempt_gap(self, gap_id: int) -> dict[str, Any]:
+        from kivi.skills.gap_closer import GapCloser
+        from kivi.skills.gaps import get_gap_log
+
+        core = self._core
+        closer = GapCloser(
+            router=getattr(core, "router", None),
+            registry=self._skill_registry(),
+            gaps=get_gap_log(),
+        )
+        success, how, message = closer.attempt_close(int(gap_id))
+        return {
+            "ok": True,
+            "success": bool(success),
+            "how": str(how),
+            "message": str(message),
+        }
+
     def reflect_now(self) -> dict[str, Any]:
         """Принудительная рефлексия по текущей истории (для кнопки UI)."""
         core = self._core
@@ -516,6 +582,31 @@ class ApiServer:
             except (TypeError, ValueError):
                 limit = 10
             await self._reply(websocket, {"ok": True, "gaps": self.gaps(limit)})
+        elif command == "get_skills":
+            await self._reply(websocket, {"ok": True, "skills": self.skills_payload()})
+        elif command == "set_skill_enabled":
+            result = self.set_skill_enabled(
+                str(message.get("name") or ""), bool(message.get("enabled"))
+            )
+            await self._reply(websocket, result)
+        elif command == "test_skill":
+            result = self.test_skill(str(message.get("name") or ""))
+            await self._reply(websocket, result)
+        elif command == "close_gap":
+            try:
+                gap_id = int(message.get("id"))
+            except (TypeError, ValueError):
+                await self._reply(websocket, {"ok": False, "error": "bad gap id"})
+                return
+            await self._reply(websocket, self.close_gap(gap_id))
+        elif command == "attempt_gap":
+            try:
+                gap_id = int(message.get("id"))
+            except (TypeError, ValueError):
+                await self._reply(websocket, {"ok": False, "error": "bad gap id"})
+                return
+            result = await asyncio.to_thread(self.attempt_gap, gap_id)
+            await self._reply(websocket, result)
         elif command == "get_memory":
             kind = str(message.get("kind") or "profile")
             await self._reply(

@@ -41,6 +41,14 @@ const ui = {
   customPreview: $('#custom-preview'),
   memoryList: $('#memory-list'),
   memoryState: $('#memory-state'),
+  skillsList: $('#skills-list'),
+  skillsState: $('#skills-state'),
+  gapsBody: $('#gaps-body'),
+  gapsState: $('#gaps-state'),
+  scheduleForm: $('#schedule-form'),
+  scheduleWhen: $('#schedule-when'),
+  scheduleWhat: $('#schedule-what'),
+  scheduleAdd: $('#btn-schedule-add'),
 };
 
 let socket = null;
@@ -298,6 +306,8 @@ function loadMemory(kind = memoryKind) {
   $$('.memory-tab').forEach((tab) => {
     tab.classList.toggle('active', tab.dataset.kind === memoryKind);
   });
+  if (ui.scheduleForm && memoryKind !== 'schedule') ui.scheduleForm.hidden = true;
+  if (ui.scheduleAdd) ui.scheduleAdd.hidden = memoryKind !== 'schedule';
   if (!ui.memoryList) return;
   ui.memoryList.textContent = 'Загружаю…';
   setMemoryState('');
@@ -346,6 +356,215 @@ function initMemory() {
   if (reflect) reflect.addEventListener('click', reflectMemoryNow);
 }
 
+/* --- скиллы --- */
+
+function skillStat(label, value) {
+  const item = document.createElement('span');
+  item.className = 'skill-stat';
+  item.textContent = `${label}: ${value}`;
+  return item;
+}
+
+function renderSkills(skills) {
+  if (!ui.skillsList) return;
+  ui.skillsList.replaceChildren();
+  if (!skills.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'Скиллы не найдены.';
+    ui.skillsList.append(empty);
+    return;
+  }
+  skills.forEach((skill) => {
+    const row = document.createElement('div');
+    row.className = 'skill-row';
+
+    const main = document.createElement('div');
+    main.className = 'skill-main';
+    const title = document.createElement('div');
+    title.className = 'skill-title';
+    title.textContent = skill.name;
+    const description = document.createElement('div');
+    description.className = 'skill-description';
+    description.textContent = skill.description || '—';
+    main.append(title, description);
+
+    const stats = document.createElement('div');
+    stats.className = 'skill-stats';
+    stats.append(
+      skillStat('вызовов', skill.use_count || 0),
+      skillStat('успешно', skill.success_count || 0),
+      skillStat('ошибок', skill.fail_count || 0),
+    );
+
+    const controls = document.createElement('div');
+    controls.className = 'skill-controls';
+    const toggle = document.createElement('label');
+    toggle.className = 'skill-toggle';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = Boolean(skill.enabled);
+    checkbox.addEventListener('change', () => {
+      request('set_skill_enabled', { name: skill.name, enabled: checkbox.checked })
+        .then((reply) => {
+          if (reply.ok === false) {
+            checkbox.checked = !checkbox.checked;
+            showToast(`не удалось переключить ${skill.name}`);
+            return;
+          }
+          setSkillsState(`${skill.name}: ${checkbox.checked ? 'включён' : 'выключен'}`);
+        })
+        .catch(() => {
+          checkbox.checked = !checkbox.checked;
+          showToast('нет связи с ядром');
+        });
+    });
+    const toggleText = document.createElement('span');
+    toggleText.textContent = 'вкл';
+    toggle.append(checkbox, toggleText);
+
+    const testButton = document.createElement('button');
+    testButton.className = 'ghost-btn skill-test';
+    testButton.textContent = 'Протестировать';
+    testButton.addEventListener('click', () => {
+      request('test_skill', { name: skill.name })
+        .then((reply) => {
+          showToast(reply.message || reply.error || 'тест завершён');
+        })
+        .catch(() => showToast('нет связи с ядром'));
+    });
+    controls.append(toggle, testButton);
+    row.append(main, stats, controls);
+    ui.skillsList.append(row);
+  });
+}
+
+function setSkillsState(text) {
+  if (ui.skillsState) ui.skillsState.textContent = text;
+}
+
+function loadSkills() {
+  if (!ui.skillsList) return;
+  ui.skillsList.textContent = 'Загружаю…';
+  setSkillsState('');
+  request('get_skills')
+    .then((reply) => {
+      const skills = Array.isArray(reply.skills) ? reply.skills : [];
+      renderSkills(skills);
+      setSkillsState(`скиллов: ${skills.length}`);
+    })
+    .catch((error) => {
+      ui.skillsList.textContent = 'Нет связи с ядром.';
+      setSkillsState(`ошибка: ${error.message || error}`);
+    });
+}
+
+function initSkills() {
+  const refresh = $('#btn-skills-refresh');
+  if (refresh) refresh.addEventListener('click', loadSkills);
+}
+
+/* --- пробелы --- */
+
+function makeGapButton(label, handler) {
+  const button = document.createElement('button');
+  button.className = 'ghost-btn gap-action';
+  button.textContent = label;
+  button.addEventListener('click', handler);
+  return button;
+}
+
+function renderGaps(gaps) {
+  if (!ui.gapsBody) return;
+  ui.gapsBody.replaceChildren();
+  if (!gaps.length) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 5;
+    cell.className = 'muted';
+    cell.textContent = 'Пробелов нет.';
+    row.append(cell);
+    ui.gapsBody.append(row);
+    return;
+  }
+  gaps.forEach((gap) => {
+    const row = document.createElement('tr');
+    const command = document.createElement('td');
+    command.textContent = gap.command || '—';
+    const intent = document.createElement('td');
+    intent.textContent = gap.user_intent || '—';
+    const attempts = document.createElement('td');
+    attempts.textContent = String(gap.attempts_to_close ?? gap.attempts ?? 1);
+    const closed = document.createElement('td');
+    closed.textContent = gap.closed_how || (gap.closed_at ? 'да' : '—');
+    const actions = document.createElement('td');
+    actions.className = 'gap-actions';
+    actions.append(
+      makeGapButton('Закрыть вручную', () => {
+        request('close_gap', { id: gap.id })
+          .then((reply) => {
+            setGapsState(reply.ok ? `пробел ${gap.id} закрыт` : 'не удалось закрыть');
+            loadGaps();
+          })
+          .catch(() => setGapsState('нет связи с ядром'));
+      }),
+      makeGapButton('Попытаться закрыть', () => {
+        setGapsState(`пробел ${gap.id}: пробую…`);
+        request('attempt_gap', { id: gap.id }, 120000)
+          .then((reply) => {
+            setGapsState(reply.message || reply.error || 'готово');
+            loadGaps();
+          })
+          .catch(() => setGapsState('не удалось: нет связи/таймаут'));
+      }),
+    );
+    row.append(command, intent, attempts, closed, actions);
+    ui.gapsBody.append(row);
+  });
+}
+
+function setGapsState(text) {
+  if (ui.gapsState) ui.gapsState.textContent = text;
+}
+
+function loadGaps() {
+  if (!ui.gapsBody) return;
+  setGapsState('Загружаю…');
+  request('get_gaps', { limit: 50 })
+    .then((reply) => {
+      const gaps = Array.isArray(reply.gaps) ? reply.gaps : [];
+      renderGaps(gaps);
+      setGapsState(`пробелов: ${gaps.length}`);
+    })
+    .catch((error) => {
+      ui.gapsBody.replaceChildren();
+      setGapsState(`ошибка: ${error.message || error}`);
+    });
+}
+
+function initGaps() {
+  const refresh = $('#btn-gaps-refresh');
+  if (refresh) refresh.addEventListener('click', loadGaps);
+}
+
+/* --- расписание --- */
+
+function initSchedule() {
+  const add = ui.scheduleAdd;
+  const save = $('#btn-schedule-save');
+  if (add) {
+    add.addEventListener('click', () => {
+      if (ui.scheduleForm) ui.scheduleForm.hidden = !ui.scheduleForm.hidden;
+    });
+  }
+  if (save) {
+    save.addEventListener('click', () => {
+      setMemoryState('Форма добавления события — заглушка; используй голосовую команду «запомни…».');
+      if (ui.scheduleForm) ui.scheduleForm.hidden = true;
+    });
+  }
+}
+
 /* --- инициализация интерфейса --- */
 
 function initNav() {
@@ -359,6 +578,8 @@ function initNav() {
       });
       if (page === 'logs') loadLogs();
       if (page === 'memory') loadMemory(memoryKind);
+      if (page === 'skills') loadSkills();
+      if (page === 'gaps') loadGaps();
     });
   });
   const refresh = $('#btn-refresh-logs');
@@ -415,6 +636,9 @@ function init() {
   initWindowControls();
   initVolume();
   initMemory();
+  initSkills();
+  initGaps();
+  initSchedule();
   setConnection(false);
   connect();
 }

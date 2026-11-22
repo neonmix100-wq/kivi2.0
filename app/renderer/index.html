@@ -42,10 +42,9 @@
           <button class="nav-item active" data-page="overview">Обзор</button>
           <button class="nav-item" data-page="logs">Логи</button>
           <button class="nav-item" data-page="memory">Память</button>
+          <button class="nav-item" data-page="skills">Скиллы</button>
+          <button class="nav-item" data-page="gaps">Пробелы</button>
           <button class="nav-item" data-page="settings">Настройки</button>
-          <div class="nav-label">скоро</div>
-          <button class="nav-item muted" data-page="skills">Скиллы</button>
-          <button class="nav-item muted" data-page="gaps">Пробелы</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -151,10 +150,13 @@
         </section>
 
         <section class="page" id="page-skills">
-          <div class="page-head"><div><h1>Скиллы</h1><p>Установка и вызов умений.</p></div></div>
-          <article class="panel placeholder">
-            <strong>Каркас страницы</strong>
-            <p>Каталог умений, установка с GitHub и запуск появятся следующим шагом.</p>
+          <div class="page-head">
+            <div><h1>Скиллы</h1><p>Статистика, включение и тестовый вызов.</p></div>
+            <button class="ghost-btn" id="btn-skills-refresh">Обновить</button>
+          </div>
+          <article class="panel">
+            <div class="skills-list" id="skills-list"></div>
+            <div class="muted" id="skills-state"></div>
           </article>
         </section>
 
@@ -178,15 +180,39 @@
           </div>
           <article class="panel">
             <pre class="memory-list" id="memory-list">Выбери вкладку и нажми «Обновить».</pre>
+            <div class="memory-actions memory-actions-bottom">
+              <button class="ghost-btn" id="btn-schedule-add">Добавить событие</button>
+            </div>
+            <div class="schedule-form" id="schedule-form" hidden>
+              <input id="schedule-when" placeholder="ПН 09:00">
+              <input id="schedule-what" placeholder="Событие">
+              <button class="ghost-btn" id="btn-schedule-save">Добавить</button>
+            </div>
             <div class="muted" id="memory-state"></div>
           </article>
         </section>
 
         <section class="page" id="page-gaps">
-          <div class="page-head"><div><h1>Пробелы</h1><p>Частые просьбы без умения.</p></div></div>
-          <article class="panel placeholder">
-            <strong>Каркас страницы</strong>
-            <p>Таблица capability_gaps через API get_gaps появится следующим шагом.</p>
+          <div class="page-head">
+            <div><h1>Пробелы</h1><p>Частые просьбы без умения.</p></div>
+            <button class="ghost-btn" id="btn-gaps-refresh">Обновить</button>
+          </div>
+          <article class="panel">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Команда</th>
+                    <th>Намерение</th>
+                    <th>Попыток</th>
+                    <th>Закрыт</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="gaps-body"></tbody>
+              </table>
+            </div>
+            <div class="muted" id="gaps-state"></div>
           </article>
         </section>
       </main>

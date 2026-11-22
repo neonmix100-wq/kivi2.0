@@ -1,0 +1,32 @@
+name: remember
+version: "1.0.0"
+description: "Запомнить событие, задачу, предпочтение или факт"
+category: data
+triggers:
+  - запомни
+  - добавь в расписание
+  - поставь задачу
+  - запиши
+  - не забудь что
+  - напомни что
+intents:
+  - запомнить факт
+  - добавить событие в расписание
+  - поставить задачу
+  - запомнить предпочтение
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: ["D:\\Kivi\\memory"]
+  tools: [self_memory]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

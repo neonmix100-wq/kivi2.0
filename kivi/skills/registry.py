@@ -411,6 +411,27 @@ class SkillRegistry:
         logger.info("скиллы: {} включён, серия ошибок сброшена", name)
         return True
 
+    def disable(self, name: str) -> bool:
+        """Выключить скилл через skill_flags (для UI). True — если он есть."""
+        manifest = self.get(str(name))
+        if manifest is None:
+            logger.warning("скиллы: выключить {!r} нельзя — такого скилла нет", name)
+            return False
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.execute(
+                    "INSERT INTO skill_flags (name, enabled, updated_ts) VALUES (?, 0, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET enabled = 0, "
+                    "updated_ts = excluded.updated_ts",
+                    (str(name), time.time()),
+                )
+        except sqlite3.Error as exc:  # noqa: BLE001 - флаг не критичнее диалога
+            logger.warning("скиллы: не удалось выключить {}: {}", name, exc)
+            return False
+        self._skills[str(name)] = manifest.model_copy(update={"enabled": False})
+        logger.info("скиллы: {} выключен", name)
+        return True
+
     # --- статистика ---
 
     def _connect(self) -> sqlite3.Connection:

@@ -946,3 +946,138 @@ body.overlay-body {
   padding-top: 10px;
   font-size: 12px;
 }
+
+.memory-actions-bottom {
+  padding-top: 10px;
+}
+
+.schedule-form {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  flex-wrap: wrap;
+}
+
+.schedule-form input {
+  min-width: 160px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--text);
+  outline: none;
+}
+
+.schedule-form input:focus {
+  border-color: var(--accent);
+}
+
+/* --- скиллы --- */
+
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-2);
+}
+
+.skill-title {
+  font-weight: 650;
+}
+
+.skill-description {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.skill-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.skill-stat {
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+
+.skill-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.skill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.skill-toggle input {
+  accent-color: var(--accent);
+}
+
+.skill-test {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+/* --- пробелы --- */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.gap-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gap-action {
+  padding: 6px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}

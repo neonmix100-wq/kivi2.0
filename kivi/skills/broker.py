@@ -262,6 +262,59 @@ class SkillContext:
 
         return set_tts_volume(value)
 
+    # --- память через vault (skills/remember) ---
+
+    def _memory_root(self) -> Path:
+        """Проверить, что скиллу разрешён vault, и вернуть его корень."""
+        self._require_tool("self_memory")
+        from kivi.memory.vault import vault_root
+
+        root = vault_root().resolve()
+        allowed = [self._resolve_path(item) for item in self.manifest.permissions.filesystem]
+        if not any(self._within(root, prefix) for prefix in allowed):
+            raise PermissionDenied(
+                f"скиллу «{self.name}» запрещён vault {root}: "
+                f"разрешены только {allowed or 'пусто'}"
+            )
+        return root
+
+    def vault_add_schedule(self, when: str, what: str) -> bool:
+        """Добавить событие в memory/schedule.md. Нужен tool self_memory."""
+        root = self._memory_root()
+        from kivi.memory.vault import add_schedule
+
+        return bool(add_schedule(when, what, path=root))
+
+    def vault_add_task(self, what: str) -> bool:
+        """Добавить задачу в memory/tasks.md. Нужен tool self_memory."""
+        root = self._memory_root()
+        from kivi.memory.vault import add_task
+
+        return bool(add_task(what, "open", path=root))
+
+    def vault_add_preference(self, what: str) -> bool:
+        """Добавить предпочтение в memory/profile.md. Нужен tool self_memory."""
+        root = self._memory_root()
+        from kivi.memory.vault import add_preference
+
+        return bool(add_preference(what, path=root))
+
+    def vault_add_fact(self, what: str) -> bool:
+        """Добавить факт в memory/profile.md. Нужен tool self_memory."""
+        root = self._memory_root()
+        from kivi.memory.vault import add_fact
+
+        return bool(add_fact(what, kind="profile", path=root))
+
+    # --- напоминания ---
+
+    def scheduler(self, time: str, what: str) -> str:
+        """Записать напоминание. Нужен tool scheduler."""
+        self._require_tool("scheduler")
+        from kivi.skills.reminders import add_reminder
+
+        return add_reminder(str(time), str(what))
+
     # --- безобидные методы: доступны всегда ---
 
     def notify(self, text: str) -> None:

@@ -1,0 +1,27 @@
+name: reminders
+version: "1.0.0"
+description: "Голосовое напоминание ко времени"
+category: system
+triggers:
+  - напомни в
+  - поставь напоминание на
+  - разбуди в
+intents:
+  - поставить напоминание
+  - напомнить в заданное время
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: []
+  tools: [scheduler]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""
