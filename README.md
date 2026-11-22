@@ -31,7 +31,8 @@ STT: локально faster-whisper large-v3-turbo, CUDA int8_float16, 0.2-0.5�
 Скиллам не давать os/subprocess/environ; .env и *.db закрыты брокером.
 
 ## Не регрессировать (починено)
-- Звук через ffplay: один плеер + lock, уникальные temp-файлы.
+- Звук через sounddevice/output.py: выбор выхода по имени/default, AEC по
+  PlaybackRef; один playback lock и уникальные temp-файлы TTS.
 - Whisper: читать wav через soundfile (не PyAV), передавать numpy.
 - CUDA DLL: os.add_dll_directory из sysconfig purelib/nvidia/{cublas,cudnn,
   cuda_nvrtc}/bin ДО импорта faster_whisper.
