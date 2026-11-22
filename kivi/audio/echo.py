@@ -138,18 +138,33 @@ class PlaybackRef:
                     self._append_locked(np.zeros(gap, dtype=np.float32))
                     self._end_time += gap / self.samplerate
                 self._end_time = current
-            data = self._linear_locked()
-            if data.size == 0:
+            data_size = self._filled
+            if data_size <= 0:
                 return np.zeros(count, dtype=np.float32)
             skip = int(round(max(0.0, float(delay_s)) * self.samplerate))
-            end = data.size - skip
+            end = data_size - skip
             if end <= 0:
                 return np.zeros(count, dtype=np.float32)
-            start = max(0, end - count)
-            piece = data[start:end]
+            start = end - count
+            pad = max(0, -start)
+            start = max(0, start)
+            length = max(0, end - start)
+            oldest = (self._write_pos - self._filled) % self.capacity
+            position = (oldest + start) % self.capacity
+            if length <= 0:
+                piece = np.zeros(0, dtype=np.float32)
+            elif position + length <= self.capacity:
+                piece = self._buffer[position : position + length].copy()
+            else:
+                first = self.capacity - position
+                piece = np.concatenate(
+                    (self._buffer[position:], self._buffer[: length - first])
+                )
+            if pad:
+                piece = np.pad(piece, (pad, 0))
             if piece.size < count:
                 piece = np.pad(piece, (count - piece.size, 0))
-            return piece.astype(np.float32, copy=False)
+            return piece[:count].astype(np.float32, copy=False)
 
     def is_recent(self, now: float | None = None, window_s: float = 0.0) -> bool:
         current = time.monotonic() if now is None else float(now)
