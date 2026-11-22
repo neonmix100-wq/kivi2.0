@@ -83,8 +83,8 @@ class PlaybackRef:
     def write(
         self,
         pcm: Any,
-        *,
         samplerate: int | None = None,
+        *,
         at: float | None = None,
     ) -> None:
         """Записать реально отправленный в устройство PCM в референс."""
@@ -118,7 +118,6 @@ class PlaybackRef:
     def snapshot(
         self,
         frames: int,
-        *,
         delay_s: float = 0.0,
         now: float | None = None,
     ) -> np.ndarray:
@@ -243,7 +242,7 @@ class EchoSuppressor:
             self.echo_cleaned,
         )
 
-    def process(self, frame: Any, *, now: float | None = None) -> np.ndarray:
+    def process(self, frame: Any, now: float | None = None) -> np.ndarray:
         """Очистить один кадр микрофона; вернуть массив той же длины/типа."""
         source = np.asarray(frame)
         if not self.enabled or source.size == 0:
