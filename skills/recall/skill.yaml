@@ -1,0 +1,31 @@
+name: recall
+version: "1.0.0"
+description: "Короткий ответ по расписанию и открытым задачам из памяти"
+category: data
+triggers:
+  - что у меня сегодня
+  - что по плану
+  - какое расписание
+  - что на неделе
+  - мои задачи
+  - что я просил не забывать
+intents:
+  - показать расписание
+  - показать открытые задачи
+  - напомнить планы
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: ["D:\\Kivi\\memory"]
+  tools: [fs_read]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

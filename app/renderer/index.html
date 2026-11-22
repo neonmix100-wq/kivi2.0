@@ -41,10 +41,10 @@
         <nav class="nav">
           <button class="nav-item active" data-page="overview">Обзор</button>
           <button class="nav-item" data-page="logs">Логи</button>
+          <button class="nav-item" data-page="memory">Память</button>
           <button class="nav-item" data-page="settings">Настройки</button>
           <div class="nav-label">скоро</div>
           <button class="nav-item muted" data-page="skills">Скиллы</button>
-          <button class="nav-item muted" data-page="memory">Память</button>
           <button class="nav-item muted" data-page="gaps">Пробелы</button>
         </nav>
 
@@ -159,10 +159,26 @@
         </section>
 
         <section class="page" id="page-memory">
-          <div class="page-head"><div><h1>Память</h1><p>Факты, журнал и темы vault.</p></div></div>
-          <article class="panel placeholder">
-            <strong>Каркас страницы</strong>
-            <p>Просмотр memory/ через API get_memory появится следующим шагом.</p>
+          <div class="page-head">
+            <div>
+              <h1>Память</h1>
+              <p>Профиль, расписание, задачи, темы и люди из vault.</p>
+            </div>
+            <div class="memory-actions">
+              <button class="ghost-btn" id="btn-memory-refresh">Обновить</button>
+              <button class="ghost-btn" id="btn-memory-reflect">Извлечь сейчас</button>
+            </div>
+          </div>
+          <div class="memory-tabs" id="memory-tabs">
+            <button class="memory-tab active" data-kind="profile">Профиль</button>
+            <button class="memory-tab" data-kind="schedule">Расписание</button>
+            <button class="memory-tab" data-kind="tasks">Задачи</button>
+            <button class="memory-tab" data-kind="topics">Темы</button>
+            <button class="memory-tab" data-kind="people">Люди</button>
+          </div>
+          <article class="panel">
+            <pre class="memory-list" id="memory-list">Выбери вкладку и нажми «Обновить».</pre>
+            <div class="muted" id="memory-state"></div>
           </article>
         </section>
 

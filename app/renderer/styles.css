@@ -889,3 +889,60 @@ body.overlay-body {
   animation: card-in 0.16s ease-out;
   word-break: break-word;
 }
+
+/* --- память --- */
+
+.memory-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.memory-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.memory-tab {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.memory-tab:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.memory-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.memory-list {
+  min-height: 260px;
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--text);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#memory-state {
+  padding-top: 10px;
+  font-size: 12px;
+}

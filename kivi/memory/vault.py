@@ -23,11 +23,17 @@ from kivi.log import logger
 __all__ = [
     "VAULT_KINDS",
     "add_fact",
+    "add_preference",
+    "add_schedule",
+    "add_task",
     "ensure_vault",
     "fact_exists",
     "iter_facts",
+    "iter_schedule",
+    "iter_tasks",
     "list_notes",
     "normalize_fact",
+    "normalize_item",
     "note_path",
     "read_note",
     "slugify",
@@ -35,8 +41,16 @@ __all__ = [
     "write_note",
 ]
 
-VAULT_KINDS = ("profile", "journal", "topics", "people")
+VAULT_KINDS = (
+    "profile",
+    "schedule",
+    "tasks",
+    "journal",
+    "topics",
+    "people",
+)
 _FACT_RE = re.compile(r"^\s*[-*]\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.+?)\s*$")
+_ENTRY_RE = re.compile(r"^\s*[-*]\s*\[([^\]]+)\]\s*(.+?)\s*$")
 
 
 def vault_root(path: str | Path | None = None) -> Path:
@@ -50,14 +64,22 @@ def vault_root(path: str | Path | None = None) -> Path:
 
 
 def ensure_vault(path: str | Path | None = None) -> Path:
-    """Создать папки и пустой profile.md, если vault ещё нет."""
+    """Создать папки и базовые markdown-файлы, если vault ещё нет."""
     root = vault_root(path)
+    created = False
     for sub in ("journal", "topics", "people"):
         (root / sub).mkdir(parents=True, exist_ok=True)
-    profile = root / "profile.md"
-    if not profile.exists():
-        write_note("profile", "", "# Профиль Лёши\n", path=root)
-        logger.info("Vault: создан {}", root)
+    for kind, title in (
+        ("profile", "# Профиль Лёши"),
+        ("schedule", "# Расписание"),
+        ("tasks", "# Задачи"),
+    ):
+        note = root / f"{kind}.md"
+        if not note.exists():
+            write_note(kind, "", title + "\n", path=root)
+            created = True
+    if created:
+        logger.info("Vault: подготовлен {}", root)
     return root
 
 
@@ -73,6 +95,8 @@ def note_path(kind: str, name: str = "", path: str | Path | None = None) -> Path
     root = vault_root(path)
     if kind == "profile":
         return root / "profile.md"
+    if kind in ("schedule", "tasks"):
+        return root / f"{kind}.md"
     if kind == "journal":
         return root / "journal" / f"{name}.md"
     if kind in ("topic", "topics"):
@@ -106,6 +130,8 @@ def list_notes(kind: str | None = None, path: str | Path | None = None) -> list[
         found = [p for p in root.rglob("*.md") if not p.name.startswith(".tmp_")]
     elif kind == "profile":
         found = [root / "profile.md"]
+    elif kind in ("schedule", "tasks"):
+        found = [root / f"{kind}.md"]
     else:
         folder = root / kind
         found = list(folder.glob("*.md")) if folder.is_dir() else []
@@ -118,6 +144,127 @@ def normalize_fact(text: str) -> str:
     cleaned = cleaned.lower().replace("ё", "е")
     cleaned = re.sub(r"[^\w\s]", " ", cleaned, flags=re.UNICODE)
     return " ".join(cleaned.split())
+
+
+def normalize_item(text: str) -> str:
+    """Нормализация строк расписания/задач: дата и время сохраняются цифрами."""
+    cleaned = str(text).lower().replace("ё", "е")
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned, flags=re.UNICODE)
+    return " ".join(cleaned.split())
+
+
+def iter_schedule(path: str | Path | None = None) -> list[tuple[str, str]]:
+    """Записи schedule.md как (when, what)."""
+    text = read_note("schedule", "", path)
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        match = _ENTRY_RE.match(line)
+        if match:
+            found.append((match.group(1).strip(), match.group(2).strip()))
+    return found
+
+
+def iter_tasks(path: str | Path | None = None) -> list[tuple[str, str]]:
+    """Записи tasks.md как (status, what)."""
+    text = read_note("tasks", "", path)
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        match = _ENTRY_RE.match(line)
+        if match:
+            found.append((match.group(1).strip().lower(), match.group(2).strip()))
+    return found
+
+
+def _canonical_when(when: str) -> str:
+    """Привести частые формулировки LLM к виду «будни 09:00»."""
+    raw = " ".join(str(when).split())
+    lowered = raw.lower().replace("ё", "е")
+    time_match = re.search(r"\b([01]?\d|2[0-3])[:.](\d{2})", raw)
+    time_text = (
+        f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+        if time_match
+        else ""
+    )
+    if not time_text:
+        bare_hour = re.search(r"\bв\s*([01]?\d|2[0-3])(?:\s|$)", lowered)
+        if bare_hour:
+            time_text = f"{int(bare_hour.group(1)):02d}:00"
+    if time_text and "будн" in lowered:
+        return f"будни {time_text}"
+    if time_text and ("каждый день" in lowered or "ежедневно" in lowered):
+        return f"ежедневно {time_text}"
+    return raw
+
+
+def add_schedule(when: str, what: str, path: str | Path | None = None) -> bool:
+    """Добавить строку расписания; False — пусто или дубликат."""
+    when_text = _canonical_when(str(when or ""))
+    what_text = " ".join(str(what or "").split())
+    if not when_text or not what_text:
+        return False
+    root = ensure_vault(path)
+    target = normalize_item(f"{when_text} {what_text}")
+    for existing_when, existing_what in iter_schedule(root):
+        if normalize_item(f"{existing_when} {existing_what}") == target:
+            logger.debug("Vault: расписание уже есть — [{}] {}", when_text, what_text)
+            return False
+    content = read_note("schedule", "", root)
+    if not content.strip():
+        content = "# Расписание\n"
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"- [{when_text}] {what_text}\n"
+    write_note("schedule", "", content, root)
+    logger.info("Vault: расписание добавлено [{}] {}", when_text, what_text[:100])
+    return True
+
+
+def add_task(what: str, status: str = "open", path: str | Path | None = None) -> bool:
+    """Добавить/закрыть задачу; done помечает существующую open."""
+    what_text = " ".join(str(what or "").split())
+    status_text = str(status or "open").strip().lower()
+    if status_text not in ("open", "done"):
+        status_text = "open"
+    if not what_text:
+        return False
+    root = ensure_vault(path)
+    target = normalize_item(what_text)
+    content = read_note("tasks", "", root)
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        match = _ENTRY_RE.match(line)
+        if not match:
+            continue
+        current_status = match.group(1).strip().lower()
+        if normalize_item(match.group(2)) != target:
+            continue
+        if status_text == "done" and current_status != "done":
+            lines[index] = f"- [done] {match.group(2).strip()}"
+            write_note("tasks", "", "\n".join(lines).rstrip() + "\n", root)
+            logger.info("Vault: задача закрыта — {}", what_text[:100])
+            return True
+        logger.debug("Vault: задача уже есть — [{}] {}", current_status, what_text)
+        return False
+    if not content.strip():
+        content = "# Задачи\n"
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"- [{status_text}] {what_text}\n"
+    write_note("tasks", "", content, root)
+    logger.info("Vault: задача добавлена [{}] {}", status_text, what_text[:100])
+    return True
+
+
+def add_preference(text: str, path: str | Path | None = None) -> bool:
+    """Предпочтение в profile.md; повтор нормализованного текста не пишется."""
+    preference = " ".join(str(text or "").split())
+    if not preference:
+        return False
+    root = ensure_vault(path)
+    if fact_exists(preference, root):
+        logger.debug("Vault: предпочтение уже есть — {}", preference[:80])
+        return False
+    return add_fact(f"предпочтение: {preference}", kind="profile", path=root)
 
 
 def iter_facts(

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from kivi.config import DATA_DIR
 from kivi.log import logger
-from kivi.memory.vault import iter_facts
+from kivi.memory.vault import iter_facts, iter_schedule, iter_tasks
 
 __all__ = ["INDEX_DB", "MemoryRetriever", "cosine"]
 
@@ -29,6 +29,17 @@ INDEX_DB = DATA_DIR / "memory_index.db"
 DEFAULT_MODEL = "baai/bge-m3"
 FALLBACK_MODELS = ("openai/text-embedding-3-small",)
 EMBED_TIMEOUT = 30.0
+MAX_KIND_TOKENS = 500
+CHARS_PER_TOKEN = 3
+SCHEDULE_HINTS = (
+    "сегодня",
+    "завтра",
+    "недел",
+    "план",
+    "расписан",
+    "встреч",
+)
+TASK_HINTS = ("просил", "не забывай", "задач", "сделать", "сделай")
 STOPWORDS = {
     "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то",
     "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за",
@@ -66,6 +77,34 @@ def _words(text: str) -> set[str]:
 
 def _hash(text: str) -> str:
     return hashlib.sha256(" ".join(str(text).lower().split()).encode("utf-8")).hexdigest()
+
+
+def _entry_lines(kind: str, vault_path: str | Path | None = None) -> list[str]:
+    """Строки структурированной памяти для блока в промпт."""
+    if kind == "schedule":
+        entries = [f"[{when}] {what}" for when, what in iter_schedule(vault_path)]
+    elif kind == "tasks":
+        entries = [
+            f"[{status}] {what}"
+            for status, what in iter_tasks(vault_path)
+            if status == "open"
+        ]
+    else:
+        return []
+    return entries
+
+
+def _trim_lines(lines: list[str], max_tokens: int = MAX_KIND_TOKENS) -> list[str]:
+    """Обрезка структурированного блока примерно до max_tokens."""
+    limit = max_tokens * CHARS_PER_TOKEN
+    selected: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > limit and selected:
+            break
+        selected.append(line[:limit])
+        used += len(line) + 1
+    return selected
 
 
 def _memory_embed_model() -> str:
@@ -184,15 +223,10 @@ class MemoryRetriever:
     def _facts(self) -> list[str]:
         return [fact for _note, _day, fact in iter_facts(self.vault_path)]
 
-    def retrieve(self, query: str, k: int | None = None) -> list[str]:
-        """Top-k фактов по смыслу (или по словам, если эмбеддинги недоступны)."""
-        limit = int(k if k is not None else self.k)
-        text = str(query or "").strip()
-        facts = self._facts()
+    def _rank_facts(self, text: str, facts: list[str], limit: int) -> list[str]:
+        """Top-k фактов по эмбеддингам или keyword-фолбэку."""
         if not text or not facts:
-            self.last_path = "empty"
             return []
-
         embedded = self.embed([text])
         if embedded is not None:
             missing = [fact for fact in facts if self._cached_vector(fact) is None]
@@ -237,6 +271,55 @@ class MemoryRetriever:
             len(facts),
         )
         return [fact for _score, fact in scored_kw[:limit]]
+
+    def retrieve(self, query: str, k: int | None = None) -> list[str]:
+        """Структурированные виды + top-k фактов по смыслу."""
+        limit = int(k if k is not None else self.k)
+        text = str(query or "").strip()
+        lowered = text.lower().replace("ё", "е")
+        kinds: list[str] = []
+        selected: list[str] = []
+
+        if any(hint in lowered for hint in SCHEDULE_HINTS):
+            schedule = _trim_lines(_entry_lines("schedule", self.vault_path))
+            if schedule:
+                selected.extend(schedule)
+                kinds.append("schedule")
+
+        if any(hint in lowered for hint in TASK_HINTS):
+            tasks = _trim_lines(_entry_lines("tasks", self.vault_path))
+            if tasks:
+                selected.extend(tasks)
+                kinds.append("tasks")
+
+        facts = self._facts()
+        if text and facts:
+            selected.extend(self._rank_facts(text, facts, limit))
+        elif kinds and not selected:
+            self.last_path = "empty"
+
+        if not selected:
+            self.last_path = "empty"
+            return []
+
+        # Один и тот же факт мог попасть и в structured-блок, и в top-k.
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in selected:
+            key = " ".join(str(item).lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(str(item))
+        if kinds:
+            logger.info(
+                "память: подобрано видов {} ({})",
+                len(kinds),
+                "/".join(kinds),
+            )
+        if not facts and kinds:
+            self.last_path = "kinds"
+        return unique
 
     def index_all(self) -> int:
         """Переиндексировать все факты vault. Возвращает число записей в кэше."""

@@ -8,7 +8,7 @@
 Команды (clients -> core):
     ask{question,options}, confirm{title,body,details}, info{text},
     ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
-    get_status, get_gaps{limit}, get_memory{kind}, tail_logs{n}, shutdown
+    get_status, get_gaps{limit}, get_memory{kind}, reflect_now, tail_logs{n}, shutdown
 Ответ на команду: {ok, ...}.
 
 Слушаем СТРОГО 127.0.0.1. Аутентификации нет: доступен только loopback.
@@ -350,12 +350,56 @@ class ApiServer:
 
         return get_gap_log().list_recent(limit=max(1, int(limit)))
 
+    def memory_kinds(self) -> list[str]:
+        """Список видов памяти: memory.kinds из config, иначе базовый набор."""
+        fallback = ["profile", "schedule", "tasks", "topics", "people"]
+        try:
+            raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            kinds = (raw.get("memory") or {}).get("kinds")
+            if isinstance(kinds, list) and kinds:
+                return [str(item).strip().lower() for item in kinds if str(item).strip()]
+        except (OSError, yaml.YAMLError):
+            pass
+        return fallback
+
+    def _memory_kind(self, kind: str) -> str:
+        valid = str(kind or "profile").strip().lower()
+        return valid if valid in self.memory_kinds() else "profile"
+
+    def memory_lines(self, kind: str = "profile") -> list[str]:
+        """Строки заметки/папки для UI и внешних клиентов."""
+        from kivi.memory.vault import list_notes, read_note, vault_root
+
+        valid = self._memory_kind(kind)
+        root = vault_root()
+        if valid in ("profile", "schedule", "tasks"):
+            text = read_note(valid, "", root)
+            return [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        lines: list[str] = []
+        for path in list_notes(valid)[:20]:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            name = path.name
+            for line in text.splitlines():
+                cleaned = line.strip()
+                if cleaned and not cleaned.startswith("#"):
+                    lines.append(f"{name}: {cleaned}")
+        return lines
+
     def memory_items(self, kind: str = "profile") -> list[dict[str, str]]:
         from kivi.memory.vault import list_notes, vault_root
 
-        valid = str(kind or "profile").strip().lower()
-        if valid not in ("profile", "journal", "topics", "people"):
-            valid = "profile"
+        valid = self._memory_kind(kind)
+        if valid in ("profile", "schedule", "tasks"):
+            return [{"name": valid, "text": line} for line in self.memory_lines(valid)]
         root = vault_root()
         items: list[dict[str, str]] = []
         for path in list_notes(valid)[:20]:
@@ -371,6 +415,41 @@ class ApiServer:
                 name = path.name
             items.append({"name": name, "text": text[:2000]})
         return items
+
+    def reflect_now(self) -> dict[str, Any]:
+        """Принудительная рефлексия по текущей истории (для кнопки UI)."""
+        core = self._core
+        reflector = getattr(core, "reflector", None)
+        if reflector is None:
+            return {"ok": False, "error": "рефлексия недоступна"}
+        session = None
+        getter = getattr(core, "_get_session", None)
+        messages: list[dict] = []
+        max_ts = 0.0
+        try:
+            if callable(getter):
+                session = getter()
+            if session is not None and hasattr(session, "messages_since"):
+                messages, max_ts = session.messages_since(0, max_tokens=3000)
+            elif session is not None and hasattr(session, "history"):
+                messages = session.history(max_tokens=3000)
+            try:
+                stats = reflector.run(messages, force=True)
+            except TypeError:
+                stats = reflector.run(messages)
+            if isinstance(stats, dict) and not stats.get("skipped") and max_ts:
+                if hasattr(core, "_on_reflected"):
+                    core._on_reflected(max_ts)
+                scheduler = getattr(core, "reflect_scheduler", None)
+                if scheduler is not None:
+                    scheduler.last_reflected_ts = max(
+                        float(getattr(scheduler, "last_reflected_ts", 0.0)),
+                        float(max_ts),
+                    )
+            return {"ok": True, "stats": stats}
+        except Exception as exc:  # noqa: BLE001 - UI не должен падать
+            logger.warning("api: reflect_now упал: {}: {}", type(exc).__name__, exc)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     # --- обработка клиентов ---
 
@@ -441,8 +520,18 @@ class ApiServer:
             kind = str(message.get("kind") or "profile")
             await self._reply(
                 websocket,
-                {"ok": True, "kind": kind, "items": self.memory_items(kind)},
+                {
+                    "ok": True,
+                    "kind": self._memory_kind(kind),
+                    "items": self.memory_items(kind),
+                    "lines": self.memory_lines(kind),
+                },
             )
+        elif command == "reflect_now":
+            result = await asyncio.to_thread(self.reflect_now)
+            if "ok" not in result:
+                result = {"ok": True, **result}
+            await self._reply(websocket, result)
         elif command == "ask":
             question = str(message.get("question") or "")
             options = [

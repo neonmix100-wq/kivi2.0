@@ -1,8 +1,11 @@
 """Проход извлечения фактов из диалога в vault.
 
 Один вызов LLM (task_type="memory") со строгим JSON-ответом:
-    {"facts":[{"text","kind","who"}], "decisions":[{"what","why"}], "open_loops":[{"what"}]}
-Факты раскладываются по заметкам с датой, решения и открытые вопросы — в journal дня.
+    {"facts":[{"text","kind"}], "schedule":[{"when","what"}],
+     "tasks":[{"what","status"}], "preferences":[{"text"}],
+     "decisions":[{"what","why"}], "open_loops":[{"what"}]}
+Факты раскладываются по заметкам с датой; расписание — schedule.md,
+задачи — tasks.md, предпочтения — profile.md; решения/вопросы — в journal дня.
 Не чаще раза в 5 минут.
 """
 
@@ -19,7 +22,15 @@ from typing import Any
 
 from kivi.config import get_settings
 from kivi.log import logger
-from kivi.memory.vault import add_fact, read_note, vault_root, write_note
+from kivi.memory.vault import (
+    add_fact,
+    add_preference,
+    add_schedule,
+    add_task,
+    read_note,
+    vault_root,
+    write_note,
+)
 
 __all__ = [
     "DEFAULT_REFLECT_CHECK_S",
@@ -43,13 +54,22 @@ REFLECT_PROMPT = (
     "Ты — хранитель долгой памяти голосового ассистента Киви.\n"
     "Разбери диалог и верни СТРОГО один JSON без markdown и без пояснений:\n"
     '{"facts":[{"text":"...","kind":"profile|person|topic","who":"..."}],'
+    '"schedule":[{"when":"ПН 09:00","what":"..."}],'
+    '"tasks":[{"what":"...","status":"open|done"}],'
+    '"preferences":[{"text":"..."}],'
     '"decisions":[{"what":"...","why":"..."}],'
     '"open_loops":[{"what":"..."}]}\n'
     "Правила:\n"
-    "- facts: только устойчивые факты о Лёше и его окружении (имена, даты, привычки, "
-    "предпочтения, техника). Не выдумывай, не пиши мелочи диалога.\n"
-    "- kind=profile — про Лёшу; person — про другого человека (who = имя); "
-    "topic — долгоживущая тема/проект (who = тема).\n"
+    "- Извлекай ТОЛЬКО то, что явно сказано в диалоге. Не выдумывай факты, "
+    "события, задачи и предпочтения; мелочи диалога не сохраняй.\n"
+    "- facts: устойчивые факты о Лёше и его окружении. kind=profile — про Лёшу; "
+    "person — про другого человека (who = имя); topic — тема/проект (who = тема).\n"
+    "- schedule: повторяющиеся и датированные события. when: «ПН 09:00» для "
+    "одного дня, «будни 09:00» для каждого буднего дня, «ежедневно 08:00», "
+    "«2026-11-22 19:00» для даты.\n"
+    "- tasks: только явные просьбы/задачи. status=open для новой, done только "
+    "если пользователь явно сказал, что задача выполнена.\n"
+    "- preferences: явные вкусы и предпочтения (например, «люблю короткий ответ»).\n"
     "- decisions: что решили и почему. open_loops: что осталось сделать.\n"
     "- Если нечего — верни пустые списки.\n"
 )
@@ -98,7 +118,16 @@ class Reflector:
 
     def run(self, messages: list[dict] | None = None, *, force: bool = False) -> dict:
         """Извлечь факты. Возвращает статистику прохода (и стоимость)."""
-        stats = {"facts": 0, "decisions": 0, "open_loops": 0, "cost_rub": 0.0, "skipped": ""}
+        stats = {
+            "facts": 0,
+            "schedule": 0,
+            "tasks": 0,
+            "preferences": 0,
+            "decisions": 0,
+            "open_loops": 0,
+            "cost_rub": 0.0,
+            "skipped": "",
+        }
         if not self.enabled:
             stats["skipped"] = "выключено в конфиге"
             return stats
@@ -142,12 +171,21 @@ class Reflector:
             return stats
 
         stats["facts"] = self._save_facts(payload.get("facts") or [])
+        stats["schedule"] = self._save_schedule(payload.get("schedule") or [])
+        stats["tasks"] = self._save_tasks(payload.get("tasks") or [])
+        stats["preferences"] = self._save_preferences(
+            payload.get("preferences") or []
+        )
         stats["decisions"] = len(payload.get("decisions") or [])
         stats["open_loops"] = len(payload.get("open_loops") or [])
         self._write_journal(payload)
         logger.info(
-            "Reflect: фактов {}, решений {}, вопросов {}, стоимость {:.5f} руб",
+            "Reflect: фактов {}, расписание {}, задач {}, предпочтений {}, "
+            "решений {}, вопросов {}, стоимость {:.5f} руб",
             stats["facts"],
+            stats["schedule"],
+            stats["tasks"],
+            stats["preferences"],
             stats["decisions"],
             stats["open_loops"],
             stats["cost_rub"],
@@ -185,6 +223,46 @@ class Reflector:
                 who=str(item.get("who") or ""),
                 path=self.vault_path,
             ):
+                saved += 1
+        return saved
+
+    def _save_schedule(self, items: list) -> int:
+        saved = 0
+        for item in items:
+            if isinstance(item, str):
+                when, what = "", item.strip()
+            elif isinstance(item, dict):
+                when = str(item.get("when") or "").strip()
+                what = str(item.get("what") or "").strip()
+            else:
+                continue
+            if add_schedule(when, what, path=self.vault_path):
+                saved += 1
+        return saved
+
+    def _save_tasks(self, items: list) -> int:
+        saved = 0
+        for item in items:
+            if isinstance(item, str):
+                what, status = item.strip(), "open"
+            elif isinstance(item, dict):
+                what = str(item.get("what") or "").strip()
+                status = str(item.get("status") or "open").strip().lower()
+            else:
+                continue
+            if add_task(what, status, path=self.vault_path):
+                saved += 1
+        return saved
+
+    def _save_preferences(self, items: list) -> int:
+        saved = 0
+        for item in items:
+            text = (
+                str(item.get("text") or "").strip()
+                if isinstance(item, dict)
+                else str(item).strip()
+            )
+            if add_preference(text, path=self.vault_path):
                 saved += 1
         return saved
 

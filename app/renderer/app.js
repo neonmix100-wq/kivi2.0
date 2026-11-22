@@ -39,6 +39,8 @@ const ui = {
   toast: $('#toast'),
   customAccent: $('#custom-accent'),
   customPreview: $('#custom-preview'),
+  memoryList: $('#memory-list'),
+  memoryState: $('#memory-state'),
 };
 
 let socket = null;
@@ -46,6 +48,7 @@ let reconnectTimer = null;
 let pendingRequest = null;
 let volumeDragging = false;
 let toastTimer = null;
+let memoryKind = 'profile';
 
 /* --- тема и шрифт --- */
 
@@ -276,6 +279,73 @@ function loadLogs() {
   }).catch(() => {});
 }
 
+/* --- память --- */
+
+function memoryReplyLines(reply) {
+  if (Array.isArray(reply.lines)) return reply.lines.map((line) => String(line));
+  if (Array.isArray(reply.items)) {
+    return reply.items.map((item) => String(item.text || item.name || item));
+  }
+  return [];
+}
+
+function setMemoryState(text) {
+  if (ui.memoryState) ui.memoryState.textContent = text;
+}
+
+function loadMemory(kind = memoryKind) {
+  memoryKind = kind || 'profile';
+  $$('.memory-tab').forEach((tab) => {
+    tab.classList.toggle('active', tab.dataset.kind === memoryKind);
+  });
+  if (!ui.memoryList) return;
+  ui.memoryList.textContent = 'Загружаю…';
+  setMemoryState('');
+  request('get_memory', { kind: memoryKind })
+    .then((reply) => {
+      const lines = memoryReplyLines(reply);
+      ui.memoryList.textContent = lines.length
+        ? lines.join('\n')
+        : 'Пока пусто.';
+      setMemoryState(`вид: ${reply.kind || memoryKind} · строк: ${lines.length}`);
+    })
+    .catch((error) => {
+      ui.memoryList.textContent = 'Нет связи с ядром.';
+      setMemoryState(`ошибка: ${error.message || error}`);
+    });
+}
+
+function reflectMemoryNow() {
+  setMemoryState('Извлекаю память…');
+  request('reflect_now', {}, 90000)
+    .then((reply) => {
+      if (reply.ok === false) {
+        setMemoryState(`не удалось: ${reply.error || 'ошибка'}`);
+        return;
+      }
+      const stats = reply.stats || {};
+      const summary = [
+        `фактов ${stats.facts ?? 0}`,
+        `расписание ${stats.schedule ?? 0}`,
+        `задач ${stats.tasks ?? 0}`,
+        `предпочтений ${stats.preferences ?? 0}`,
+      ].join(' · ');
+      setMemoryState(`готово: ${summary}`);
+      loadMemory(memoryKind);
+    })
+    .catch((error) => setMemoryState(`не удалось: ${error.message || error}`));
+}
+
+function initMemory() {
+  $$('.memory-tab').forEach((tab) => {
+    tab.addEventListener('click', () => loadMemory(tab.dataset.kind));
+  });
+  const refresh = $('#btn-memory-refresh');
+  if (refresh) refresh.addEventListener('click', () => loadMemory(memoryKind));
+  const reflect = $('#btn-memory-reflect');
+  if (reflect) reflect.addEventListener('click', reflectMemoryNow);
+}
+
 /* --- инициализация интерфейса --- */
 
 function initNav() {
@@ -288,6 +358,7 @@ function initNav() {
         section.classList.toggle('active', section.id === `page-${page}`);
       });
       if (page === 'logs') loadLogs();
+      if (page === 'memory') loadMemory(memoryKind);
     });
   });
   const refresh = $('#btn-refresh-logs');
@@ -343,6 +414,7 @@ function init() {
   initNav();
   initWindowControls();
   initVolume();
+  initMemory();
   setConnection(false);
   connect();
 }

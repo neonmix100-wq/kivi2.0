@@ -42,6 +42,7 @@ stt:
 memory:
   enabled: true
   vault_path: "memory"
+  kinds: [profile, schedule, tasks, topics, people]
   reflect_every_turns: 20
   reflect_on_idle_min: 10
   reflect_check_s: 60

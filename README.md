@@ -56,29 +56,28 @@ session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
 kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search};
 kivi/wake/{detector,loop}; kivi/runtime; kivi/main;
 kivi/api/{server,pending,client}; kivi/ui/overlay; app/ (Electron, vanilla).
-Скиллы: skills/{time_date,file_search}; skills/installed/ (gitignore).
+Скиллы: skills/{time_date,file_search,assistant_volume,recall};
+skills/installed/ (gitignore).
 Данные: data/kivi.db (usage, capability_gaps, messages), data/skills.db,
 data/models, data/tts_cache, data/opencode_jobs, memory/ (Obsidian-vault),
 data/logs/kivi.log.
 
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
-opencode,flow,dialogue,search_context,tts_stream,memory,api,volume_exit,
-reflect_sched}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
+volume_exit,reflect_sched}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Планировщик рефлексии вынесен в отдельный поток `ReflectScheduler`:
-проверка раз в `memory.reflect_check_s: 60`, сон между проверками, запуск
-только при репликах с `ts > last_reflected_ts` и простое больше
-`reflect_on_idle_min`; не чаще `reflect_min_interval_s: 300`, после успеха
-`last_reflected_ts` обновляется. Повторный старт игнорируется с WARNING
-(модульный флаг `_started`). В API ядро теперь имеет per-client очередь
-отправки: при переполнении >200 сообщений INFO-строки пропускаются,
-WARNING/ERROR всегда доходят. Голосовой тракт, router и budget не менялись.
-Проверка: python tests\smoke_reflect_sched.py -> PASS; регрессии
-smoke_memory, smoke_flow, smoke_dialogue, smoke_api -> PASS. 10 минут
-простоя живого ядра: в логе только строка запуска планировщика и финальная
-`reflection завершён`, повторов рефлексии нет.
+Память расширена: `memory/schedule.md` (`[when] what`), `memory/tasks.md`
+(`[open|done] what`), предпочтения пишутся в `profile.md`. Reflection
+извлекает `facts/schedule/tasks/preferences`, дедуплицирует строки, `done`
+закрывает существующую open-задачу. `retrieve` подмешивает schedule/tasks
+по ключевым словам и пишет лог «память: подобрано видов N». Добавлен
+builtin-скилл `skills/recall` с доступом только к `D:\Kivi\memory`.
+В приложении секция Память: вкладки Профиль/Расписание/Задачи/Темы/Люди,
+«Обновить» и «Извлечь сейчас» (`reflect_now` в API).
+Проверка: python tests\smoke_memory_deep.py -> PASS; регрессии
+smoke_memory, smoke_flow, smoke_dialogue, smoke_api -> PASS.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить
