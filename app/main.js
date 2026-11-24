@@ -279,7 +279,7 @@ ipcMain.on('window:maximize', () => {
 });
 ipcMain.on('window:close', () => { if (mainWindow) mainWindow.close(); });
 ipcMain.on('app:quit', () => app.quit());
-ipcMain.on('theme-alpha', (_event, payload) => {
+ipcMain.on("theme-alpha", (_event, payload) => {
   if (!mainWindow || mainWindowTransparent) return;
   const value = Math.min(1, Math.max(0.3, Number(payload && payload.alpha) || 1));
   try { mainWindow.setOpacity(value); } catch (_) { /* ignore */ }

@@ -33,7 +33,8 @@ let resizeScheduled = false;
 function applyStoredTheme() {
   try {
     const theme = localStorage.getItem('kivi.theme') || 'dark';
-    const accent = localStorage.getItem('kivi.accent') || '#f0703c';
+    const accent = localStorage.getItem('kivi.accent')
+      || getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
     const font = localStorage.getItem('kivi.font') || 'system';
     document.documentElement.dataset.theme = theme;
     const fonts = {

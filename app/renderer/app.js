@@ -795,6 +795,9 @@ function addChatTurn(turn, { autoScroll = true } = {}) {
   if (empty) empty.remove();
   const bubble = document.createElement('div');
   bubble.className = `chat-bubble ${role}`;
+  const el = bubble;
+  el.classList.add('bubble', role);
+  el.dataset.role = turn.role;
   const text = document.createElement('div');
   text.className = 'chat-bubble-text';
   text.textContent = String(turn.text);
@@ -813,6 +816,9 @@ function addChatTurn(turn, { autoScroll = true } = {}) {
   if (source.textContent) meta.append(source);
   if (meta.childElementCount) bubble.append(meta);
   ui.chatFeed.append(bubble);
+  if (window.KiviTheme && window.KiviTheme.paintBubbles) {
+    window.KiviTheme.paintBubbles();
+  }
   if (autoScroll) scrollChatToBottom();
 }
 
