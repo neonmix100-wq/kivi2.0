@@ -1,6 +1,8 @@
 (function(){
 "use strict";
 const KEY="kivi.theme.v2";
+const SAVED_KEY="kivi.theme.saved.v1";
+const THEME_WS="ws://127.0.0.1:8765";
 const PRESETS={
  dark:{bg:"#171b22",surface:"#20252e",surface2:"#1b2029",border:"#2c333d",text:"#e8ecf1",dim:"#9aa4b2",accent:"#f0"+"703c",bubbleUser:null,bubbleKivi:null,alpha:1,radius:16,font:"system",sync:true},
  light:{bg:"#f2f4f8",surface:"#ffffff",surface2:"#e9edf3",border:"#d4dae3",text:"#1b2029",dim:"#5b6472",accent:"#e0"+"5f2a",bubbleUser:null,bubbleKivi:"#e9edf3",alpha:1,radius:16,font:"system",sync:true},
@@ -14,8 +16,72 @@ function rgbStr(h){return hexRgb(h).join(",");}
 function lum(h){const[r,g,b]=hexRgb(h).map(v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);});return 0.2126*r+0.7152*g+0.0722*b;}
 function onColor(h){return lum(h)>0.45?"#101418":"#ffffff";}
 function hslHex(h,s,l){s/=100;l/=100;const k=n=>(n+h/30)%12,a=s*Math.min(l,1-l),f=n=>l-a*Math.max(-1,Math.min(k(n)-3,Math.min(9-k(n),1)));const to=x=>Math.round(255*x).toString(16).padStart(2,"0");return"#"+to(f(0))+to(f(8))+to(f(4));}
-function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&PRESETS[s.preset])return Object.assign({},PRESETS[s.preset],s);}catch(e){}return Object.assign({preset:"dark"},PRESETS.dark);}
+function normalizeTheme(value){
+ const s=(value&&typeof value==="object")?value:{};
+ return Object.assign({preset:"dark"},PRESETS.dark,PRESETS[s.preset]||{},s);
+}
+function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&typeof s==="object")return normalizeTheme(s);}catch(e){}return Object.assign({preset:"dark"},PRESETS.dark);}
 let state=load();
+let saved=loadSavedList();
+let diskTimer=null;
+let hydrateTimer=null;
+let hydrating=false;
+let lastDeleted=null;
+function isOverlayPage(){return !!(document.body&&document.body.dataset.window==="overlay");}
+function loadSavedList(){
+ try{const a=JSON.parse(localStorage.getItem(SAVED_KEY));if(Array.isArray(a))return a.filter(s=>s&&s.id&&s.name);}catch(e){}
+ return [];
+}
+function createSocketApi(){
+ let socket=null,retry=null;const handlers={},queue=[];
+ function schedule(){if(retry)return;retry=setTimeout(()=>{retry=null;connect();},2000);}
+ function connect(){
+  if(socket&&(socket.readyState===WebSocket.OPEN||socket.readyState===WebSocket.CONNECTING))return;
+  try{socket=new WebSocket(THEME_WS);}catch(e){schedule();return;}
+  socket.onopen=()=>{while(queue.length&&socket&&socket.readyState===WebSocket.OPEN){try{socket.send(queue.shift());}catch(e){break;}}};
+  socket.onmessage=e=>{try{const m=JSON.parse(e.data);if(m&&m.event&&handlers[m.event])handlers[m.event].slice().forEach(fn=>{try{fn(m);}catch(err){}});}catch(err){}};
+  socket.onclose=()=>{socket=null;schedule();};
+  socket.onerror=()=>{try{if(socket)socket.close();}catch(e){}};
+ }
+ function send(command,payload){connect();const raw=JSON.stringify({command,...(payload||{})});if(socket&&socket.readyState===WebSocket.OPEN)socket.send(raw);else queue.push(raw);}
+ function on(event,fn){if(typeof fn!=="function")return()=>{};(handlers[event]||(handlers[event]=[])).push(fn);connect();return()=>{const list=handlers[event]||[];const i=list.indexOf(fn);if(i>=0)list.splice(i,1);};}
+ return{send,on};
+}
+const api=window.api||createSocketApi();
+if(!window.api)window.api=api;
+function queueDisk(){
+ if(isOverlayPage()||hydrating)return;
+ clearTimeout(diskTimer);
+ diskTimer=setTimeout(()=>{api.send("set_theme",{theme:{current:state,saved:saved}});},400);
+}
+function persistSaved(){try{localStorage.setItem(SAVED_KEY,JSON.stringify(saved));}catch(e){}queueDisk();}
+function toast(msg,actionLabel,actionFn){
+ const t=document.createElement("div");t.className="toast";t.textContent=msg;
+ if(actionLabel){const b=document.createElement("button");b.type="button";b.textContent=actionLabel;b.onclick=()=>{try{if(actionFn)actionFn();}finally{t.remove();}};t.append(b);}
+ document.body.append(t);setTimeout(()=>t.remove(),4200);
+}
+function renderSaved(){
+ const box=document.getElementById("theme-saved");if(!box)return;box.innerHTML="";
+ saved.forEach(s=>{
+  const chip=document.createElement("div");chip.className="theme-chip";
+  const load=document.createElement("button");load.type="button";load.className="chip-load";
+  load.textContent=s.name;load.title="Загрузить тему";
+  load.onclick=()=>{state=normalizeTheme(s.state);apply();toast("Тема «"+s.name+"» загружена");};
+  const del=document.createElement("button");del.type="button";del.className="chip-del";
+  del.textContent="×";del.title="Удалить тему";
+  del.onclick=()=>{lastDeleted=s;saved=saved.filter(v=>v.id!==s.id);persistSaved();renderSaved();
+   toast("Тема «"+s.name+"» удалена","Отменить",()=>{if(lastDeleted)saved.push(lastDeleted);lastDeleted=null;persistSaved();renderSaved();});};
+  chip.append(load,del);box.append(chip);
+ });
+}
+function saveCurrent(){
+ const inp=document.getElementById("theme-name");
+ const name=(inp&&inp.value.trim())||("Своя "+(saved.length+1));
+ const rec={id:"t"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:name,state:JSON.parse(JSON.stringify(state)),ts:Date.now()};
+ saved=saved.filter(s=>s.name!==name);saved.push(rec);
+ persistSaved();renderSaved();if(inp)inp.value="";
+ toast("Тема «"+name+"» сохранена");
+}
 function resolved(){
  const accent=state.accent||PRESETS.dark.accent;
  const bu=state.sync?accent:(state.bubbleUser||accent);
@@ -40,9 +106,10 @@ function apply(){
  r.setProperty("--muted",state.dim);r.setProperty("--accent-soft",`rgba(${rgbStr(accent)},.16)`);
  r.setProperty("--glow",`rgba(${rgbStr(accent)},.18)`);
  localStorage.setItem(KEY,JSON.stringify(state));
- try{if(window.kivi&&window.kivi.send)window.kivi.send("theme-alpha",{alpha});}catch(e){}
+ try{if(!isOverlayPage()&&window.kivi&&window.kivi.send)window.kivi.send("theme-alpha",{alpha});}catch(e){}
  syncInputs();
  paintBubbles();
+ queueDisk();
 }
 function syncInputs(){
  document.querySelectorAll("[data-theme-key]").forEach(el=>{const k=el.dataset.themeKey;if(el.type==="color"){const r=resolved();el.value=state[k]||(k==="bubbleUser"?r.bu:k==="bubbleKivi"?r.bk:"#000000");}});
@@ -80,6 +147,8 @@ function bind(){
  on("theme-random",randomize);
  on("theme-export",exportTheme);
  on("theme-import",importTheme);
+ on("theme-save",saveCurrent);
+ renderSaved();
 }
 function ensureEditor(){
   if(document.getElementById("theme-editor")) return;
@@ -106,7 +175,8 @@ function ensureEditor(){
    '<label class="theme-field">Скругление <span data-theme-radius-val>16px</span><input type="range" min="0" max="24" value="16" data-theme-radius></label>'+
    '<label class="theme-field">Шрифт<select data-theme-font><option value="system">Системный</option><option value="tahoma">Tahoma</option><option value="verdana">Verdana</option><option value="georgia">Georgia</option></select></label>'+
    '<label class="theme-field"><span><input type="checkbox" data-theme-sync checked> Облака следуют системному цвету</span></label></div>'+
-   '<div class="theme-actions"><button id="theme-reset">Сброс</button><button id="theme-random">Случайная тема</button><button id="theme-export">Экспорт</button><button id="theme-import">Импорт</button></div>';
+   '<div class="theme-actions"><button id="theme-reset">Сброс</button><button id="theme-random">Случайная тема</button><button id="theme-export">Экспорт</button><button id="theme-import">Импорт</button></div>'+
+   '<div class="theme-save-row"><input id="theme-name" placeholder="Имя темы"><button id="theme-save">Сохранить тему</button></div><div id="theme-saved" class="theme-saved"></div>';
   host.prepend(wrap);
 }
 function paintBubbles(){
@@ -126,5 +196,28 @@ function startBubbleObserver(){
   bubbleObs.observe(log,{childList:true,subtree:true,attributes:true,attributeFilter:["class","data-role"]});
 }
 window.KiviTheme={apply,randomize,exportTheme,importTheme,paintBubbles,ensureEditor,get state(){return state;},presets:PRESETS};
-if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",()=>{ensureEditor();bind();apply();startBubbleObserver();});else{ensureEditor();bind();apply();startBubbleObserver();}
+function applyRemoteTheme(message){
+ if(!message||!message.theme)return;
+ if(message.theme.current)state=normalizeTheme(message.theme.current);
+ if(Array.isArray(message.theme.saved))saved=message.theme.saved;
+ hydrating=false;clearTimeout(hydrateTimer);
+ apply();renderSaved();
+}
+const isOverlay=isOverlayPage();
+if(isOverlay){
+ apply();
+ api.on("theme",applyRemoteTheme);
+ api.on("theme_changed",applyRemoteTheme);
+ api.send("get_theme",{});
+ return;
+}
+ensureEditor();bind();
+if(!localStorage.getItem(KEY)){
+ hydrating=true;
+ api.on("theme",applyRemoteTheme);
+ hydrateTimer=setTimeout(()=>{hydrating=false;},1500);
+ api.send("get_theme",{});
+}
+api.on("theme_changed",e=>{if(e.theme&&Array.isArray(e.theme.saved)){saved=e.theme.saved;renderSaved();}});
+apply();startBubbleObserver();
 })();

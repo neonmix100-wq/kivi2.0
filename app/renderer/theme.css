@@ -5,6 +5,7 @@
   --bubble-user:rgb(240 112 60); --bubble-user-text:#ffffff;
   --bubble-kivi:#20252e; --bubble-kivi-text:#e8ecf1;
   --bg-alpha:1; --surface-alpha:1; --radius:16px;
+  --danger:#ef4444; --danger-text:#ffb4b4;
   --font-ui:system-ui,"Segoe UI",Tahoma,sans-serif;
 }
 html,body{background:transparent !important;}
@@ -40,6 +41,22 @@ input:focus,textarea:focus{outline:2px solid var(--accent) !important;outline-of
   background:rgba(var(--surface-rgb),.9) !important;color:var(--text) !important;
   border:1px solid var(--border) !important;border-radius:8px;padding:7px 12px;cursor:pointer;}
 .theme-actions button:hover{border-color:var(--accent) !important;color:var(--accent) !important;}
+.theme-save-row{display:flex;gap:8px;margin-top:12px;}
+.theme-save-row input{flex:1;}
+.theme-save-row button{
+  background:var(--accent) !important;color:var(--accent-contrast) !important;
+  border:1px solid var(--accent) !important;border-radius:8px;padding:7px 12px;cursor:pointer;font-weight:600;}
+.theme-saved{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+.theme-chip{display:flex;align-items:center;gap:4px;border:1px solid var(--border);
+  border-radius:calc(var(--radius)*0.6);background:rgba(var(--surface2-rgb),var(--surface-alpha));padding:4px 6px;}
+.chip-load{background:none;border:none;color:var(--text);cursor:pointer;font-size:12px;}
+.chip-load:hover{color:var(--accent);}
+.chip-del{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;line-height:1;}
+.chip-del:hover{color:var(--accent);}
+.toast{position:fixed;right:16px;bottom:16px;z-index:99;display:flex;gap:10px;align-items:center;
+  background:rgba(var(--surface-rgb),0.97);border:1px solid var(--border);color:var(--text);
+  border-radius:calc(var(--radius)*0.6);padding:10px 14px;box-shadow:0 8px 24px rgba(0,0,0,.35);}
+.toast button{background:var(--accent);color:var(--accent-contrast);border:none;border-radius:8px;padding:4px 10px;cursor:pointer;}
 .theme-presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
 .theme-swatch{width:34px;height:34px;border-radius:10px;border:2px solid var(--border);cursor:pointer;}
 .theme-swatch.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.35);}

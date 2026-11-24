@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="theme.css">
 </head>
-<body>
+<body data-window="main">
   <div class="app">
     <header class="titlebar">
       <div class="brand">
@@ -148,6 +148,11 @@
               <button id="theme-export">Экспорт</button>
               <button id="theme-import">Импорт</button>
             </div>
+            <div class="theme-save-row">
+              <input id="theme-name" placeholder="Имя темы">
+              <button id="theme-save">Сохранить тему</button>
+            </div>
+            <div class="theme-saved" id="theme-saved"></div>
           </div>
 
           <article class="panel tests-panel">

@@ -838,13 +838,13 @@ body.overlay-body {
 .card-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #1b1207;
+  color: var(--accent-contrast);
   font-weight: 650;
 }
 
 .card-btn.danger {
-  color: #ffb4b4;
-  border-color: color-mix(in srgb, #ff6b6b 45%, var(--border));
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
 }
 
 .card-input-row {

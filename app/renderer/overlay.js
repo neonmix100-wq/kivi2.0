@@ -30,36 +30,7 @@ let currentAsk = null;
 let currentConfirm = null;
 let resizeScheduled = false;
 
-function applyStoredTheme() {
-  try {
-    const theme = localStorage.getItem('kivi.theme') || 'dark';
-    const accent = localStorage.getItem('kivi.accent')
-      || getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
-    const font = localStorage.getItem('kivi.font') || 'system';
-    document.documentElement.dataset.theme = theme;
-    const fonts = {
-      system: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-      tahoma: 'Tahoma, "Segoe UI", sans-serif',
-      verdana: 'Verdana, Geneva, sans-serif',
-      georgia: 'Georgia, "Times New Roman", serif',
-    };
-    document.documentElement.style.setProperty('--font-ui', fonts[font] || fonts.system);
-    if (theme === 'custom') {
-      const clean = accent.replace('#', '');
-      const value = clean.length === 3
-        ? clean.split('').map((ch) => ch + ch).join('')
-        : clean.padEnd(6, '0').slice(0, 6);
-      const r = parseInt(value.slice(0, 2), 16) || 0;
-      const g = parseInt(value.slice(2, 4), 16) || 0;
-      const b = parseInt(value.slice(4, 6), 16) || 0;
-      document.documentElement.style.setProperty('--accent', accent);
-      document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
-      document.documentElement.style.setProperty('--glow', `rgba(${r}, ${g}, ${b}, 0.2)`);
-    }
-  } catch (_) {
-    /* localStorage может быть недоступен — остаёмся на тёмной теме */
-  }
-}
+/* Оформление оверлея полностью задаёт theme.js/theme.css. */
 
 function mode() {
   return (!askCard.hidden || !confirmCard.hidden) ? 'card' : 'pill';
@@ -242,6 +213,5 @@ confirmOk.addEventListener('click', () => closeConfirm(true));
 confirmCancel.addEventListener('click', () => closeConfirm(false));
 
 new ResizeObserver(() => scheduleResize()).observe(root);
-applyStoredTheme();
 setPill('idle', 'Kivi · IDLE', false);
 connect();

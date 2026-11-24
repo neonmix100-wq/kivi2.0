@@ -62,6 +62,26 @@ LOG_RING_SIZE = 200
 CLIENT_QUEUE_LIMIT = 200
 TEST_DIR = PROJECT_ROOT / "tests"
 TEST_TIMEOUT_S = 300.0
+THEME_PATH = PROJECT_ROOT / "data" / "theme.json"
+
+
+def _read_theme() -> dict[str, Any]:
+    """Тема с диска; битый/отсутствующий файл — безопасный дефолт."""
+    try:
+        data = json.loads(THEME_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return {"current": None, "saved": []}
+
+
+def _write_theme(theme: dict[str, Any]) -> None:
+    """Атомарно сохранить тему; директория data создаётся при необходимости."""
+    THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = THEME_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(theme, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(THEME_PATH)
 
 
 class ApiConfig(BaseModel):
@@ -805,6 +825,22 @@ class ApiServer:
 
         if command == "get_status":
             await self._reply(websocket, {"ok": True, **self.status()})
+        elif command == "get_theme":
+            await self._reply(websocket, {"event": "theme", "theme": _read_theme()})
+            await self._reply(websocket, {"ok": True})
+        elif command == "set_theme":
+            incoming = message.get("theme")
+            if not isinstance(incoming, dict):
+                incoming = {}
+            theme = _read_theme()
+            # Сохраняем saved, если клиент прислал только current.
+            if "current" in incoming:
+                theme["current"] = incoming.get("current")
+            if "saved" in incoming:
+                theme["saved"] = incoming.get("saved") or []
+            _write_theme(theme)
+            self.broadcast({"event": "theme_changed", "theme": theme})
+            await self._reply(websocket, {"ok": True})
         elif command == "set_volume":
             volume = set_tts_volume(message.get("v"))
             self.broadcast_status(volume=volume)
