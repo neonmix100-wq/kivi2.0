@@ -125,6 +125,13 @@ def _run(*, enable_api: bool = True) -> int:
         loop.api = api_server
         api_server.attach(loop)
         logger.info("api: сервер привязан к ядру (порт {})", api_server.port)
+    try:
+        from kivi.skills.broker import set_overlay_service
+        from kivi.ui.overlay import OverlayService
+
+        set_overlay_service(OverlayService(api_server) if api_server is not None else None)
+    except Exception as exc:  # noqa: BLE001 - confirm просто будет недоступен
+        logger.warning("overlay: сервис не подключён: {}", exc)
 
     devices = settings.devices
     print(f"Вход:  [{devices.input_index}] {devices.input_name}")

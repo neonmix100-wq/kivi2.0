@@ -38,7 +38,7 @@ from kivi.config import LOG_DIR_PATH as LOG_DIR
 from kivi.config import Settings, get_settings
 from kivi.stt.local import transcribe_wav
 from kivi.tts.stream import SentenceSpeaker
-from kivi.wake.detector import detect
+from kivi.wake.detector import WakeMatch, detect
 
 if TYPE_CHECKING:
     from kivi.skills.gaps import GapLog
@@ -233,6 +233,13 @@ class WakeLoop:
         self._speaker: SentenceSpeaker | None = None  # активная озвучка ответа
         # Очередь turn'ов: голос и текст не должны отвечать одновременно.
         self._turn_lock = threading.RLock()
+        self.paused = False
+        try:
+            from kivi.skills.broker import set_listen_callback
+
+            set_listen_callback(self.set_listen)
+        except Exception as exc:  # noqa: BLE001 - скилл прослушки не критичен для старта
+            logger.warning("прослушка: callback не подключён: {}", exc)
 
         # Долгая память: блок в промпт + рефлексия по расписанию.
         memory_cfg = self.settings.section("memory")
@@ -291,6 +298,16 @@ class WakeLoop:
 
     # --- публичный интерфейс ---
 
+    def set_listen(self, enabled: bool) -> bool:
+        """Включить/выключить обработку VAD-фраз (wake-детекция остаётся)."""
+        self.paused = not bool(enabled)
+        if self.paused:
+            wake_log.info("пауза прослушки")
+        else:
+            wake_log.info("прослушка возобновлена")
+        self._emit_status()
+        return not self.paused
+
     def stop(self) -> None:
         self._stop.set()
         self._stop_reflect_scheduler()
@@ -340,6 +357,7 @@ class WakeLoop:
             "window_open": bool(
                 self.window_until and time.monotonic() <= self.window_until
             ),
+            "paused": bool(getattr(self, "paused", False)),
         }
 
     def _emit_status(self) -> None:
@@ -451,6 +469,13 @@ class WakeLoop:
     def _is_end_phrase(self, text: str) -> bool:
         return _contains_phrase(text, self.end_phrases)
 
+    def _is_resume_command(self, text: str) -> bool:
+        """Команды, которые разрешены, пока прослушка на паузе."""
+        return _contains_phrase(
+            text,
+            ("включи прослушку", "слушай снова", "снова слушай"),
+        )
+
     def _drain(self, max_blocks: int = 32) -> None:
         """Выбросить накопленное аудио, чтобы не разбирать старый звук."""
         for _ in range(max_blocks):
@@ -485,6 +510,13 @@ class WakeLoop:
             return
 
         match = detect(heard)
+        resume_in_pause = self.paused and self._is_resume_command(heard)
+        if self.paused and not resume_in_pause:
+            wake_log.info("пропуск: пауза прослушки")
+            return
+        if resume_in_pause and not match.is_wake:
+            # «Слушай снова» без имени тоже должно поднять прослушку.
+            match = WakeMatch(True, heard, False, "киви")
         now = time.monotonic()
         in_window = (
             self.conversation_enabled
@@ -494,7 +526,10 @@ class WakeLoop:
         wake_log.info("диалог: режим {}", "диалог" if in_window else "ожидание имени")
 
         if match.is_wake:
-            if now - self.last_wake_ts < self.cooldown_s:
+            if (
+                now - self.last_wake_ts < self.cooldown_s
+                and not (self.paused and self._is_resume_command(heard))
+            ):
                 result = WakeResult(
                     heard, True, match.command, "cooldown", match.fuzzy, duration
                 )

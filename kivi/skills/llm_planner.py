@@ -71,6 +71,16 @@ route=skill, skill_name=remember, args: {kind: task, what}.
 «что у меня завтра/сегодня» — route=skill, skill_name=recall.
 - Если команда «мои задачи/что нужно сделать/список дел» — route=skill, \
 skill_name=tasks_list.
+- Если «что ты умеешь/что ты можешь/твои возможности/список умений» — \
+route=skill, skill_name=capabilities.
+- Если «выруби/выключи/поставь на паузу прослушку» или «не слушай» — \
+route=skill, skill_name=listen_control, args: {action: pause}.
+- Если «включи/возобнови прослушку/слушай снова» — route=skill, \
+skill_name=listen_control, args: {action: resume}.
+- Если «очисти/удали расписание|напоминания|задачу» — route=skill, \
+skill_name=memory_manage, args: {target: schedule|reminders|tasks, \
+action: clear|delete, what?}. Для «удали расписание/напоминания» action=clear. \
+Для «закрой/отметь выполненной задачу» action=done.
 Умения вне каталога не выдумывай."""
 
 # Последний вызов: причина fallback, маршрут, стоимость, модель. Нужен planner.py и смоукам.

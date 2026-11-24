@@ -1,0 +1,31 @@
+name: listen_control
+version: "1.0.0"
+description: "Поставить прослушку на паузу или включить снова"
+category: system
+triggers:
+  - выруби прослушку
+  - не слушай
+  - пауза прослушки
+  - выключи микрофон
+  - включи прослушку
+  - слушай снова
+  - снова слушай
+intents:
+  - поставить прослушку на паузу
+  - возобновить прослушку
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: []
+  tools: [listen]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

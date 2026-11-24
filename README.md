@@ -49,6 +49,10 @@ STT: локально faster-whisper large-v3-turbo, CUDA int8_float16, 0.2-0.5�
 - Диалог: окно = тишина silence_s=8 после её ответа; конец по фразам
   «конец диалога/заверши диалог/отбой»; «спасибо» НЕ закрывает;
   пока говорит сама — входящие фразы отбрасываются.
+- Пауза прослушки: wake-детекция работает, VAD-фразы игнорируются, кроме
+  resume; текст/API доступны всегда; состояние — loop.paused.
+- Поиск: DDGS api -> html -> lite, кэш data/search_cache.json TTL 600 с;
+  все бэкенды упали -> «Поиск временно недоступен, попробую чуть позже.».
 
 ## Карта модулей
 kivi/audio/{capture,vad,recorder,output,echo}; kivi/stt/{local,transcribe};
@@ -57,7 +61,8 @@ session,persona}; kivi/memory/{vault,reflect,retrieve,inject};
 kivi/skills/{registry,broker,loader,planner,llm_planner,gap_closer,search,reminders,recall};
 kivi/wake/{detector,loop}; kivi/runtime; kivi/main;
 kivi/api/{server,pending,client}; kivi/ui/overlay; app/ (Electron, vanilla).
-Скиллы: skills/{time_date,file_search,assistant_volume,recall,remember,reminders,tasks_list};
+Скиллы: skills/{time_date,file_search,assistant_volume,recall,remember,reminders,tasks_list,
+listen_control,memory_manage,capabilities};
 skills/installed/ (gitignore).
 Данные: data/kivi.db (usage, capability_gaps, messages), data/skills.db,
 data/models, data/tts_cache, data/opencode_jobs, memory/ (Obsidian-vault),
@@ -66,15 +71,17 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched,routine,echo,chat_ui}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine,echo,chat_ui,manage_search}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт голосовой приёмки)
-Секция «Чат»: `WakeLoop.handle_command(command, source)` — общая точка для
-голоса и текста; `send_text`/`get_history` в WS API, события `turn` для обеих
-ролей, общий lock turn'ов, `api.text_speaks`. В UI лента пузырей, history(50),
-live WS turn, ввод Enter/Shift+Enter и индикатор «Киви печат…».
-Проверки: `python tests\smoke_chat_ui.py` -> PASS; регрессии smoke_echo,
-smoke_routine, smoke_memory_deep, smoke_flow, smoke_dialogue, smoke_api.
+Четыре фикса: `listen_control` (пауза/resume VAD, wake-детекция остаётся),
+`memory_manage` (очистка расписания/напоминаний и задачи только после confirm),
+`capabilities` (честный список реальных скиллов) и устойчивый поиск
+(DDGS-бэкенды api/html/lite, кэш `data/search_cache.json` на 600 с,
+отдельный ответ «Поиск временно недоступен…»). Планировщик знает новые фразы.
+Проверки: `python tests\smoke_manage_search.py` -> PASS; регрессии
+smoke_chat_ui, smoke_routine, smoke_echo, smoke_flow, smoke_dialogue, smoke_api,
+smoke_memory_deep, smoke_search.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

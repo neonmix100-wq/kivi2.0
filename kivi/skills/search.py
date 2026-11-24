@@ -19,7 +19,9 @@ answer_search()      — reformulate -> search -> summarize; при NOT_FOUND о
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -28,7 +30,7 @@ import yaml
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from kivi.config import CONFIG_PATH
+from kivi.config import CONFIG_PATH, DATA_DIR
 from kivi.skills.registry import normalize_text
 
 __all__ = [
@@ -37,11 +39,17 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "NOT_FOUND",
     "NO_DATA_ANSWER",
+    "SEARCH_BACKENDS",
+    "SEARCH_UNAVAILABLE_ANSWER",
+    "SEARCH_CACHE_PATH",
+    "SEARCH_CACHE_TTL_S",
     "SearchConfig",
     "answer_search",
+    "clear_search_cache",
     "load_search_config",
     "looks_factual",
     "reformulate_query",
+    "search_unavailable",
     "search_web",
     "summarize_with_llm",
 ]
@@ -50,6 +58,12 @@ DEFAULT_MAX_RESULTS = 3
 DEFAULT_TIMEOUT_S = 15.0
 NOT_FOUND = "NOT_FOUND"
 NO_DATA_ANSWER = "Не нашла свежих данных."
+SEARCH_UNAVAILABLE_ANSWER = "Поиск временно недоступен, попробую чуть позже."
+SEARCH_BACKENDS = ("api", "html", "lite")
+SEARCH_CACHE_PATH = DATA_DIR / "search_cache.json"
+SEARCH_CACHE_TTL_S = 600.0
+_searcher_lock = threading.RLock()
+_last_search_unavailable = False
 DEFAULT_FACT_KEYWORDS = (
     "кто",
     "что",
@@ -134,38 +148,153 @@ def _normalize(rows: Any, limit: int) -> list[dict[str, str]]:
     return items
 
 
+def _query_key(query: str) -> str:
+    return " ".join(str(query or "").lower().replace("ё", "е").split())
+
+
+def _cache_path(path: str | Path | None = None) -> Path:
+    return Path(path) if path is not None else SEARCH_CACHE_PATH
+
+
+def _cache_read(path: str | Path | None = None) -> dict[str, Any]:
+    file_path = _cache_path(path)
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _cache_lookup(
+    key: str, path: str | Path | None = None
+) -> list[dict[str, str]] | None:
+    with _searcher_lock:
+        entry = _cache_read(path).get(key)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        age = time.time() - float(entry.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if age < 0 or age > SEARCH_CACHE_TTL_S:
+        return None
+    results = entry.get("results")
+    if not isinstance(results, list):
+        return None
+    return [dict(item) for item in results if isinstance(item, dict)]
+
+
+def _cache_store(
+    key: str, results: list[dict[str, str]], path: str | Path | None = None
+) -> None:
+    file_path = _cache_path(path)
+    with _searcher_lock:
+        payload = _cache_read(path)
+        payload[key] = {"ts": time.time(), "results": results}
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = file_path.with_name(file_path.name + ".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(file_path)
+        except OSError as exc:
+            logger.warning("поиск: кэш не записан {}: {}", file_path, exc)
+
+
+def clear_search_cache(path: str | Path | None = None) -> None:
+    """Очистить кэш поиска (записью пустого JSON, без удаления файла)."""
+    file_path = _cache_path(path)
+    with _searcher_lock:
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text("{}", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("поиск: кэш не очищен {}: {}", file_path, exc)
+
+
+def search_unavailable() -> bool:
+    """Последний вызов search_web завершился падением всех бэкендов."""
+    with _searcher_lock:
+        return _last_search_unavailable
+
+
+def _set_unavailable(value: bool) -> None:
+    global _last_search_unavailable
+    with _searcher_lock:
+        _last_search_unavailable = bool(value)
+
+
 def search_web(
     query: str,
     max_results: int = DEFAULT_MAX_RESULTS,
     *,
     timeout: float | None = None,
+    use_cache: bool = True,
+    cache_path: str | Path | None = None,
 ) -> list[dict[str, str]]:
     """Найти в интернете. Ошибка/таймаут/пусто -> [] (никогда не бросает)."""
     text = " ".join(str(query or "").split())
     if not text:
+        _set_unavailable(False)
         return []
+
+    key = _query_key(text)
+    if use_cache:
+        cached = _cache_lookup(key, cache_path)
+        if cached is not None:
+            logger.info("поиск: кэш {!r} -> {} результатов", text[:60], len(cached))
+            _set_unavailable(False)
+            return cached
 
     limit = float(timeout if timeout is not None else _config().timeout_s)
     limit = max(0.1, limit)
     limit_results = max(1, int(max_results))
-
-    box: dict[str, Any] = {}
-    errors: list[BaseException] = []
+    box: dict[str, Any] = {"rows": [], "failures": 0, "empty": 0}
 
     def worker() -> None:
         try:
             from duckduckgo_search import DDGS
+        except BaseException as exc:  # noqa: BLE001 - пакет/импорт
+            box["failures"] = len(SEARCH_BACKENDS)
+            logger.warning("поиск: DDGS не импортирован: {}: {}", type(exc).__name__, exc)
+            return
 
-            with warnings.catch_warnings(record=True) as caught:
-                # 8.x переименован в ddgs и печатает предупреждение при создании.
-                # record=True гасит консоль; текст уходит в DEBUG-лог.
-                warnings.simplefilter("always")
-                with DDGS(timeout=int(max(1, round(limit)))) as ddgs:
-                    box["rows"] = list(ddgs.text(text, max_results=limit_results))
-            for item in caught:
-                logger.debug("duckduckgo_search: {}", item.message)
-        except BaseException as exc:  # noqa: BLE001 - поиск не должен ронять процесс
-            errors.append(exc)
+        for backend in SEARCH_BACKENDS:
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    with DDGS(timeout=int(max(1, round(limit)))) as ddgs:
+                        try:
+                            rows = list(
+                                ddgs.text(
+                                    text,
+                                    max_results=limit_results,
+                                    backend=backend,
+                                )
+                            )
+                        except TypeError:
+                            # Старые версии DDGS не знают backend=.
+                            rows = list(ddgs.text(text, max_results=limit_results))
+                for item in caught:
+                    logger.debug("duckduckgo_search: {}", item.message)
+                normalized = _normalize(rows, limit_results)
+                if normalized:
+                    box["rows"] = normalized
+                    logger.info(
+                        "поиск: backend={} -> {} результатов",
+                        backend,
+                        len(normalized),
+                    )
+                    return
+                box["empty"] += 1
+                logger.warning("поиск: backend={} -> пусто", backend)
+            except BaseException as exc:  # noqa: BLE001 - следующий бэкенд
+                box["failures"] += 1
+                logger.warning(
+                    "поиск: backend={} -> ошибка {}: {}",
+                    backend,
+                    type(exc).__name__,
+                    exc,
+                )
 
     thread = threading.Thread(target=worker, name="kivi-search", daemon=True)
     thread.start()
@@ -173,19 +302,30 @@ def search_web(
 
     if thread.is_alive():
         logger.warning("поиск: '{}' -> таймаут {:.0f} с", text, limit)
-        return []
-    if errors:
-        logger.warning(
-            "поиск: '{}' -> ошибка {}: {}",
-            text,
-            type(errors[0]).__name__,
-            errors[0],
-        )
+        _set_unavailable(True)
         return []
 
     results = _normalize(box.get("rows"), limit_results)
-    logger.info("поиск: '{}' -> {} результатов", text, len(results))
-    return results
+    if results:
+        if use_cache:
+            _cache_store(key, results, cache_path)
+        _set_unavailable(False)
+        logger.info("поиск: '{}' -> {} результатов", text, len(results))
+        return results
+
+    failures = int(box.get("failures") or 0)
+    empty = int(box.get("empty") or 0)
+    _set_unavailable(failures > 0 and empty == 0)
+    if failures > 0:
+        logger.warning(
+            "поиск: '{}' -> все доступные бэкенды упали (failures={}, empty={})",
+            text,
+            failures,
+            empty,
+        )
+    else:
+        logger.info("поиск: '{}' -> результатов нет (empty={})", text, empty)
+    return []
 
 
 SYSTEM_PROMPT = """Ты — ассистент Киви. Пользователь спросил: {query}.
@@ -375,6 +515,9 @@ def answer_search(
         return NO_DATA_ANSWER
 
     results = search_web(query, max_results=limit, timeout=limit_timeout)
+    if search_unavailable():
+        logger.error("поиск: все бэкенды DDGS недоступны для {!r}", query[:60])
+        return SEARCH_UNAVAILABLE_ANSWER
     logger.info("поиск: попытка 1 {!r} -> {} результатов", query, len(results))
     summary = summarize_with_llm(query, results, hist, router=router)
 
@@ -382,6 +525,11 @@ def answer_search(
         query2 = reformulate_query(f"{text} (уточни запрос)", hist, router=router)
         if query2:
             results2 = search_web(query2, max_results=limit, timeout=limit_timeout)
+            if search_unavailable():
+                logger.error(
+                    "поиск: все бэкенды DDGS недоступны для {!r}", query2[:60]
+                )
+                return SEARCH_UNAVAILABLE_ANSWER
             logger.info("поиск: попытка 2 {!r} -> {} результатов", query2, len(results2))
             summary = summarize_with_llm(query2, results2, hist, router=router)
             results = results2

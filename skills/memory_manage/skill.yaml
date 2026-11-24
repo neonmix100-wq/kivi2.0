@@ -1,0 +1,33 @@
+name: memory_manage
+version: "1.0.0"
+description: "Очистка расписания/напоминаний, закрытие и удаление задач"
+category: data
+triggers:
+  - очисти расписание
+  - удали расписание
+  - очисти напоминания
+  - удали все напоминания
+  - закрой задачу
+  - отметь задачу выполненной
+  - удали задачу
+intents:
+  - очистить расписание
+  - очистить напоминания
+  - закрыть задачу
+  - удалить задачу
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: ["D:\\Kivi\\memory"]
+  tools: [fs_read, fs_write, reminders_write, confirm]
+  risk: confirm
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

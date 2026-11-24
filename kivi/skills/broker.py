@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -38,6 +40,8 @@ __all__ = [
     "SkillContext",
     "TZ_NAME",
     "project_timezone",
+    "set_listen_callback",
+    "set_overlay_service",
 ]
 
 TZ_NAME = "Asia/Novosibirsk"
@@ -46,6 +50,20 @@ MAX_HTTP_BYTES = 1_000_000  # 1 МБ на ответ сети
 MAX_READ_BYTES = 1_000_000  # 1 МБ на чтение файла
 MAX_LIST_ENTRIES = 5000  # предохранитель от обхода огромных папок
 _DB_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+_listen_callback: Callable[[bool], object] | None = None
+_overlay_service: Any | None = None
+
+
+def set_listen_callback(callback: Callable[[bool], object] | None) -> None:
+    """Подключить loop.set_listen к брокеру (для skills/listen_control)."""
+    global _listen_callback
+    _listen_callback = callback
+
+
+def set_overlay_service(service: Any | None) -> None:
+    """Подключить OverlayService для confirm-карточек."""
+    global _overlay_service
+    _overlay_service = service
 
 
 def project_timezone() -> timezone | ZoneInfo:
@@ -329,6 +347,49 @@ class SkillContext:
 
         entities = extract_entities(str(command))
         return {"keywords": entities.keywords, "date_refs": entities.date_refs}
+
+    def reminders_clear(self) -> int:
+        """Удалить pending-напоминания. Нужен tool reminders_write."""
+        self._require_tool("reminders_write")
+        from kivi.skills.reminders import clear_reminders
+
+        return int(clear_reminders())
+
+    # --- управление прослушкой / подтверждения / каталог ---
+
+    def set_listen(self, enabled: bool) -> bool:
+        """Включить/выключить обработку VAD-фраз. Нужен tool listen."""
+        self._require_tool("listen")
+        callback = _listen_callback
+        if callback is None:
+            raise RuntimeError("loop.set_listen недоступен")
+        return bool(callback(bool(enabled)))
+
+    def confirm(self, title: str, body: str = "", details: str = "") -> bool:
+        """Показать confirm-карточку. Нет UI -> False. Нужен tool confirm."""
+        self._require_tool("confirm")
+        service = _overlay_service
+        if service is None:
+            return False
+        try:
+            return bool(service.confirm(str(title), str(body), str(details)))
+        except Exception as exc:  # noqa: BLE001 - отсутствие UI не должно падать
+            logger.warning("скилл {}: confirm недоступен: {}", self.name, exc)
+            return False
+
+    def skills_list(self) -> list[dict[str, str]]:
+        """Включённые скиллы для capabilities. Нужен tool skills_read."""
+        self._require_tool("skills_read")
+        from kivi.skills.registry import get_registry
+
+        return [
+            {
+                "name": manifest.name,
+                "description": manifest.description,
+                "category": manifest.category,
+            }
+            for manifest in get_registry().list_enabled()
+        ]
 
     # --- безобидные методы: доступны всегда ---
 

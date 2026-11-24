@@ -30,6 +30,7 @@ __all__ = [
     "add_reminder",
     "cancel_reminder",
     "check_due",
+    "clear_reminders",
     "ensure_scheduler",
     "format_reminder_label",
     "list_reminders",
@@ -406,6 +407,19 @@ def cancel_reminder(
         _write(kept, path)
     logger.info("напоминание отменено: {}", target)
     return True
+
+
+def clear_reminders(*, path: str | Path | None = None) -> int:
+    """Удалить pending-напоминания, оставив done. Возвращает число удалённых."""
+    with _LOCK:
+        items = _read(path)
+        kept = [item for item in items if item.get("done")]
+        removed = len(items) - len(kept)
+        if removed:
+            _write(kept, path)
+    if removed:
+        logger.info("напоминания: очищено pending: {}", removed)
+    return removed
 
 
 def _default_speak(text: str) -> None:
