@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src ws://127.0.0.1:8765; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
   <title>Kivi</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="theme.css">
 </head>
 <body>
   <div class="app">
@@ -116,41 +117,38 @@
             </div>
           </div>
 
-          <article class="panel">
-            <h2>Тема</h2>
-            <div class="theme-grid" id="theme-grid">
-              <button class="theme-tile" data-theme="dark">
-                <span class="theme-preview preview-dark"></span><span>Тёмная</span>
-              </button>
-              <button class="theme-tile" data-theme="light">
-                <span class="theme-preview preview-light"></span><span>Светлая</span>
-              </button>
-              <button class="theme-tile" data-theme="green">
-                <span class="theme-preview preview-green"></span><span>Зелёная</span>
-              </button>
-              <button class="theme-tile" data-theme="blue">
-                <span class="theme-preview preview-blue"></span><span>Голубая</span>
-              </button>
-              <button class="theme-tile" data-theme="red">
-                <span class="theme-preview preview-red"></span><span>Красная</span>
-              </button>
-              <label class="theme-tile theme-tile-custom" data-theme="custom">
-                <span class="theme-preview preview-custom" id="custom-preview"></span>
-                <span>Своя</span>
-                <input type="color" id="custom-accent" value="#f0703c" title="Выбрать акцент">
-              </label>
+          <div class="card settings-card" id="theme-editor">
+            <h3>Оформление</h3>
+            <div class="theme-presets">
+              <button class="theme-swatch" data-preset="dark"  style="background:#171b22" title="Тёмная"></button>
+              <button class="theme-swatch" data-preset="light" style="background:#f2f4f8" title="Светлая"></button>
+              <button class="theme-swatch" data-preset="green" style="background:#22c55e" title="Зелёная"></button>
+              <button class="theme-swatch" data-preset="blue"  style="background:#38bdf8" title="Голубая"></button>
+              <button class="theme-swatch" data-preset="red"   style="background:#ef4444" title="Красная"></button>
             </div>
-          </article>
-
-          <article class="panel">
-            <h2>Шрифт</h2>
-            <div class="font-grid" id="font-grid">
-              <button class="font-tile" data-font="system"><span class="font-preview font-system">Kivi</span><span>Системный</span></button>
-              <button class="font-tile" data-font="tahoma"><span class="font-preview font-tahoma">Kivi</span><span>Tahoma</span></button>
-              <button class="font-tile" data-font="verdana"><span class="font-preview font-verdana">Kivi</span><span>Verdana</span></button>
-              <button class="font-tile" data-font="georgia"><span class="font-preview font-georgia">Kivi</span><span>Georgia</span></button>
+            <div class="theme-grid">
+              <label class="theme-field">Общий фон<input type="color" data-theme-key="bg"></label>
+              <label class="theme-field">Окна и карточки<input type="color" data-theme-key="surface"></label>
+              <label class="theme-field">Окантовка<input type="color" data-theme-key="border"></label>
+              <label class="theme-field">Текст<input type="color" data-theme-key="text"></label>
+              <label class="theme-field">Системный цвет<input type="color" data-theme-key="accent"></label>
+              <label class="theme-field">Облако моё<input type="color" data-theme-key="bubbleUser"></label>
+              <label class="theme-field">Облако Киви<input type="color" data-theme-key="bubbleKivi"></label>
+              <label class="theme-field">Прозрачность фона <span data-theme-alpha-val>100%</span>
+                <input type="range" min="30" max="100" value="100" data-theme-alpha></label>
+              <label class="theme-field">Скругление <span data-theme-radius-val>16px</span>
+                <input type="range" min="0" max="24" value="16" data-theme-radius></label>
+              <label class="theme-field">Шрифт
+                <select data-theme-font><option value="system">Системный</option><option value="tahoma">Tahoma</option><option value="verdana">Verdana</option><option value="georgia">Georgia</option></select></label>
+              <label class="theme-field"><span><input type="checkbox" data-theme-sync checked> Облака следуют системном цвету</span></label>
             </div>
-          </article>
+            <div class="theme-actions">
+              <button id="theme-reset">Сброс</button>
+              <button id="theme-random">Случайная тема</button>
+              <button id="theme-export">Экспорт</button>
+              <button id="theme-import">Импорт</button>
+            </div>
+          </div>
 
           <article class="panel tests-panel">
             <div class="panel-head">
@@ -165,7 +163,8 @@
             </div>
             <div class="tests-list" id="tests-list"></div>
             <div class="tests-console-head">
-              <span class="tests-caption" id="tests-caption">Вывод: —</span>
+              <span class="tests-caption" id="tests-title">Вывод: —</span>
+              <span class="muted" id="tests-caption" hidden></span>
               <span class="muted" id="tests-state">Загружаю список…</span>
               <span class="test-badge" id="tests-badge" hidden></span>
             </div>
@@ -265,6 +264,7 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
+  <script src="theme.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

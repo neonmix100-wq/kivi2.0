@@ -19,6 +19,7 @@ let overlayWindow = null;
 let coreChild = null;
 let coreSpawned = false;
 let appLogPath = null;
+let mainWindowTransparent = false;
 
 function writeAppLog(...args) {
   const line = args
@@ -161,14 +162,16 @@ function placeOverlay(width, height) {
 }
 
 function createMainWindow() {
-  mainWindow = new BrowserWindow({
+  const options = {
     width: 1160,
     height: 760,
     minWidth: 900,
     minHeight: 600,
     frame: false,
     show: false,
-    backgroundColor: '#171b22',
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
     title: 'Kivi',
     webPreferences: {
       preload: path.join(UI_ROOT, 'preload.js'),
@@ -177,7 +180,18 @@ function createMainWindow() {
       sandbox: true,
       devTools: !app.isPackaged,
     },
-  });
+  };
+  try {
+    mainWindow = new BrowserWindow(options);
+    mainWindowTransparent = true;
+  } catch (error) {
+    writeAppLog('Kivi transparent window unavailable:', error.message);
+    const fallback = { ...options, backgroundColor: '#171b22' };
+    delete fallback.transparent;
+    delete fallback.hasShadow;
+    mainWindow = new BrowserWindow(fallback);
+    mainWindowTransparent = false;
+  }
   mainWindow.loadFile(path.join(UI_ROOT, 'renderer', 'index.html')).then(
     () => writeAppLog('Kivi main window loaded'),
     (error) => writeAppLog('Kivi main window load error', error.message),
@@ -265,6 +279,11 @@ ipcMain.on('window:maximize', () => {
 });
 ipcMain.on('window:close', () => { if (mainWindow) mainWindow.close(); });
 ipcMain.on('app:quit', () => app.quit());
+ipcMain.on('theme-alpha', (_event, payload) => {
+  if (!mainWindow || mainWindowTransparent) return;
+  const value = Math.min(1, Math.max(0.3, Number(payload && payload.alpha) || 1));
+  try { mainWindow.setOpacity(value); } catch (_) { /* ignore */ }
+});
 
 ipcMain.on('overlay:resize', (_event, payload) => {
   if (!overlayWindow || !payload) return;

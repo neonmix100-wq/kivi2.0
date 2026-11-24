@@ -2,16 +2,6 @@
 
 const WS_URL = 'ws://127.0.0.1:8765';
 const RECONNECT_MS = 2000;
-const STORE_THEME = 'kivi.theme';
-const STORE_ACCENT = 'kivi.accent';
-const STORE_FONT = 'kivi.font';
-
-const FONTS = {
-  system: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-  tahoma: 'Tahoma, "Segoe UI", sans-serif',
-  verdana: 'Verdana, Geneva, sans-serif',
-  georgia: 'Georgia, "Times New Roman", serif',
-};
 
 const STATE_LABELS = {
   IDLE: 'ожидание',
@@ -38,8 +28,6 @@ const ui = {
   lastEventTime: $('#last-event-time'),
   logView: $('#log-view'),
   toast: $('#toast'),
-  customAccent: $('#custom-accent'),
-  customPreview: $('#custom-preview'),
   memoryList: $('#memory-list'),
   memoryState: $('#memory-state'),
   remindersView: $('#reminders-view'),
@@ -58,7 +46,7 @@ const ui = {
   chatState: $('#chat-state'),
   testsList: $('#tests-list'),
   testsState: $('#tests-state'),
-  testsCaption: $('#tests-caption'),
+  testsCaption: $('#tests-title'),
   testsBadge: $('#tests-badge'),
   testsOutput: $('#tests-output'),
   testsRefresh: $('#btn-tests-refresh'),
@@ -77,85 +65,8 @@ let currentTest = null;
 let testOutputFor = null;
 let testsQueue = [];
 
-/* --- тема и шрифт --- */
+/* --- тема оформляется в theme.js/theme.css --- */
 
-function hexToRgba(hex, alpha) {
-  const clean = String(hex).replace('#', '');
-  const value = clean.length === 3
-    ? clean.split('').map((ch) => ch + ch).join('')
-    : clean.padEnd(6, '0').slice(0, 6);
-  const r = parseInt(value.slice(0, 2), 16) || 0;
-  const g = parseInt(value.slice(2, 4), 16) || 0;
-  const b = parseInt(value.slice(4, 6), 16) || 0;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function applyTheme(theme, accent) {
-  document.documentElement.dataset.theme = theme;
-  const rootStyle = document.documentElement.style;
-  if (theme === 'custom' && accent) {
-    rootStyle.setProperty('--accent', accent);
-    rootStyle.setProperty('--accent-soft', hexToRgba(accent, 0.16));
-    rootStyle.setProperty('--glow', hexToRgba(accent, 0.2));
-    if (ui.customPreview) ui.customPreview.style.setProperty('--preview-accent', accent);
-  } else {
-    rootStyle.removeProperty('--accent');
-    rootStyle.removeProperty('--accent-soft');
-    rootStyle.removeProperty('--glow');
-  }
-  $$('.theme-tile').forEach((tile) => {
-    tile.classList.toggle('active', tile.dataset.theme === theme);
-  });
-}
-
-function applyFont(font) {
-  document.documentElement.style.setProperty('--font-ui', FONTS[font] || FONTS.system);
-  $$('.font-tile').forEach((tile) => {
-    tile.classList.toggle('active', tile.dataset.font === font);
-  });
-}
-
-function initSettings() {
-  const theme = localStorage.getItem(STORE_THEME) || 'dark';
-  const accent = localStorage.getItem(STORE_ACCENT) || '#f0703c';
-  const font = localStorage.getItem(STORE_FONT) || 'system';
-  ui.customAccent.value = accent;
-  applyTheme(theme, accent);
-  applyFont(font);
-
-  $$('.theme-tile').forEach((tile) => {
-    tile.addEventListener('click', (event) => {
-      if (event.target === ui.customAccent) return;
-      const next = tile.dataset.theme;
-      if (next === 'custom') {
-        const value = ui.customAccent.value || accent;
-        localStorage.setItem(STORE_ACCENT, value);
-        localStorage.setItem(STORE_THEME, 'custom');
-        applyTheme('custom', value);
-      } else {
-        localStorage.setItem(STORE_THEME, next);
-        applyTheme(next, accent);
-      }
-    });
-  });
-
-  ui.customAccent.addEventListener('input', () => {
-    const value = ui.customAccent.value;
-    localStorage.setItem(STORE_ACCENT, value);
-    localStorage.setItem(STORE_THEME, 'custom');
-    applyTheme('custom', value);
-  });
-
-  $$('.font-tile').forEach((tile) => {
-    tile.addEventListener('click', () => {
-      const selected = tile.dataset.font;
-      localStorage.setItem(STORE_FONT, selected);
-      applyFont(selected);
-    });
-  });
-}
-
-/* --- WS --- */
 
 function setConnection(online) {
   if (ui.connPill) {
@@ -575,11 +486,12 @@ function setTestBadge(ok) {
   if (ok === null || ok === undefined) {
     ui.testsBadge.hidden = true;
     ui.testsBadge.textContent = '';
-    ui.testsBadge.classList.remove('pass', 'fail');
+    ui.testsBadge.classList.remove('pass', 'fail', 'run');
     return;
   }
   ui.testsBadge.hidden = false;
   ui.testsBadge.textContent = ok ? 'PASS' : 'FAIL';
+  ui.testsBadge.classList.remove('run');
   ui.testsBadge.classList.toggle('pass', Boolean(ok));
   ui.testsBadge.classList.toggle('fail', !ok);
 }
@@ -589,21 +501,32 @@ function setTestCaption(name) {
   ui.testsCaption.textContent = name ? `Вывод: ${name}` : 'Вывод: —';
 }
 
+function startTestUI(name) {
+  currentTest = name;
+  testOutputFor = name;
+  const out = document.getElementById('tests-output');
+  if (out) out.textContent = '';
+  const badge = document.getElementById('tests-badge');
+  if (badge) {
+    badge.hidden = false;
+    badge.textContent = '…';
+    badge.className = 'test-badge run';
+  }
+  const title = document.getElementById('tests-title');
+  if (title) title.textContent = 'Вывод: ' + name;
+}
+
 function beginTestOutput(name) {
   currentTest = name;
   if (testOutputFor === name) return;
-  testOutputFor = name;
-  if (ui.testsOutput) ui.testsOutput.textContent = '';
-  setTestBadge(null);
-  setTestCaption(name);
+  startTestUI(name);
 }
 
-function onTestLine(message) {
-  const name = String(message.name || '');
-  if (!name) return;
-  if (currentTest && name !== currentTest) return;
-  if (testOutputFor !== name) beginTestOutput(name);
-  appendTestOutput(String(message.line || ''));
+function onTestLine(msg) {
+  if (!currentTest) startTestUI(msg.name);
+  if (msg.name !== currentTest) return;
+  if (testOutputFor !== msg.name) startTestUI(msg.name);
+  appendTestOutput(String(msg.line || ''));
 }
 
 function appendTestOutput(line) {
@@ -686,7 +609,7 @@ function startTest(name, fromQueue = false) {
   request('run_test', { name })
     .then((reply) => {
       if (reply && reply.ok === true && reply.started === true) {
-        beginTestOutput(name);
+        if (testOutputFor !== name) startTestUI(name);
         return;
       }
       const message = reply && reply.error ? reply.error : 'не удалось запустить';
@@ -736,17 +659,16 @@ function runAllTests() {
   startNextTest();
 }
 
-function onTestDone(message) {
-  const name = String(message.name || '');
-  if (!currentTest || name !== currentTest) return;
-  const ok = Boolean(message.ok);
-  const code = message.code !== undefined ? message.code : '?';
-  const duration = message.duration_s !== undefined ? Number(message.duration_s) : 0;
+function onTestDone(msg) {
+  if (msg.name !== currentTest) return;
+  const ok = Boolean(msg.ok);
+  const code = msg.code !== undefined ? msg.code : '?';
+  const duration = msg.duration_s !== undefined ? Number(msg.duration_s) : 0;
   setTestsBusy(false);
   setTestBadge(ok);
-  setTestsState(`${name}: ${ok ? 'PASS' : 'FAIL'} · ${duration.toFixed(2)} с`);
+  setTestsState(`${msg.name}: ${ok ? 'PASS' : 'FAIL'} · ${duration.toFixed(2)} с`);
   appendTestOutput(
-    `=== ${name}: ${ok ? 'PASS' : 'FAIL'} (code ${code}, ${duration.toFixed(2)} с) ===`,
+    `=== ${msg.name}: ${ok ? 'PASS' : 'FAIL'} (code ${code}, ${duration.toFixed(2)} с) ===`,
   );
   const hasQueue = testsQueue.length > 0;
   loadTests().then(() => {
@@ -1082,7 +1004,6 @@ function initScreenLook() {
 }
 
 function init() {
-  initSettings();
   initNav();
   initWindowControls();
   initVolume();

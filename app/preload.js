@@ -8,6 +8,7 @@ const SEND_CHANNELS = new Set([
   'window:close',
   'app:quit',
   'overlay:resize',
+  'theme-alpha',
 ]);
 
 const ON_CHANNELS = new Set(['window:state']);

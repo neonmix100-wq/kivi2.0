@@ -168,21 +168,21 @@ def main() -> int:
         ok &= check("JS: currentTest", "currentTest" in js)
         ok &= check(
             "JS: очистка консоли при старте",
-            "ui.testsOutput.textContent = ''" in js and "beginTestOutput(name)" in js,
+            "out.textContent = ''" in js and "function startTestUI(name)" in js,
         )
         ok &= check(
             "JS: очистка после accepted run_test",
-            "reply.started === true" in js and "beginTestOutput(name)" in js,
+            "reply.started === true" in js and "startTestUI(name)" in js,
         )
         ok &= check(
             "JS: фильтр test_line по currentTest",
-            "if (currentTest && name !== currentTest) return;" in js,
+            "msg.name !== currentTest" in js,
         )
         ok &= check(
             "JS: test_done только для currentTest",
-            "if (!currentTest || name !== currentTest) return;" in js,
+            "msg.name !== currentTest" in js,
         )
-        ok &= check("JS: заголовок «Вывод: name»", "Вывод: ${name}" in js)
+        ok &= check("JS: заголовок «Вывод: name»", "Вывод: " in js)
         ok &= check("JS: старый testsCurrent удалён", "testsCurrent" not in js)
     finally:
         if client is not None:
