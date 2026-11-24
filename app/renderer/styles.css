@@ -640,6 +640,15 @@ input {
   font-size: 12px;
 }
 
+.tests-caption {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .test-badge {
   padding: 4px 9px;
   border-radius: 999px;

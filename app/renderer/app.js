@@ -57,6 +57,7 @@ const ui = {
   chatState: $('#chat-state'),
   testsList: $('#tests-list'),
   testsState: $('#tests-state'),
+  testsCaption: $('#tests-caption'),
   testsBadge: $('#tests-badge'),
   testsOutput: $('#tests-output'),
   testsRefresh: $('#btn-tests-refresh'),
@@ -71,7 +72,8 @@ let toastTimer = null;
 let memoryKind = 'profile';
 let testsKnown = [];
 let testsRunning = false;
-let testsCurrent = null;
+let currentTest = null;
+let testOutputFor = null;
 let testsQueue = [];
 
 /* --- тема и шрифт --- */
@@ -266,7 +268,7 @@ function handleMessage(message) {
       noteEvent(`turn: ${message.role} · ${message.source || ''}`);
       break;
     case 'test_line':
-      appendTestOutput(String(message.line || ''));
+      onTestLine(message);
       break;
     case 'test_done':
       onTestDone(message);
@@ -581,6 +583,28 @@ function setTestBadge(ok) {
   ui.testsBadge.classList.toggle('fail', !ok);
 }
 
+function setTestCaption(name) {
+  if (!ui.testsCaption) return;
+  ui.testsCaption.textContent = name ? `Вывод: ${name}` : 'Вывод: —';
+}
+
+function beginTestOutput(name) {
+  currentTest = name;
+  if (testOutputFor === name) return;
+  testOutputFor = name;
+  if (ui.testsOutput) ui.testsOutput.textContent = '';
+  setTestBadge(null);
+  setTestCaption(name);
+}
+
+function onTestLine(message) {
+  const name = String(message.name || '');
+  if (!name) return;
+  if (currentTest && name !== currentTest) return;
+  if (testOutputFor !== name) beginTestOutput(name);
+  appendTestOutput(String(message.line || ''));
+}
+
 function appendTestOutput(line) {
   if (!ui.testsOutput) return;
   const view = ui.testsOutput;
@@ -653,25 +677,31 @@ function startTest(name, fromQueue = false) {
     return;
   }
   if (!fromQueue) testsQueue = [];
-  testsCurrent = name;
+  currentTest = name;
+  testOutputFor = null;
   setTestsBusy(true);
-  setTestBadge(null);
+  beginTestOutput(name);
   setTestsState(`запуск ${name}…`);
-  appendTestOutput(`\n=== ${name} ===`);
   request('run_test', { name })
     .then((reply) => {
-      if (!reply || reply.ok === false) {
-        const message = reply && reply.error ? reply.error : 'не удалось запустить';
-        testsCurrent = null;
-        setTestsBusy(false);
-        setTestsState(message);
-        setTestBadge(false);
-        appendTestOutput(`ERROR: ${message}`);
-        if (testsQueue.length) setTimeout(startNextTest, 150);
+      if (reply && reply.ok === true && reply.started === true) {
+        beginTestOutput(name);
+        return;
       }
+      const message = reply && reply.error ? reply.error : 'не удалось запустить';
+      currentTest = null;
+      testOutputFor = null;
+      setTestCaption('');
+      setTestsBusy(false);
+      setTestsState(message);
+      setTestBadge(false);
+      appendTestOutput(`ERROR: ${message}`);
+      if (testsQueue.length) setTimeout(startNextTest, 150);
     })
     .catch((error) => {
-      testsCurrent = null;
+      currentTest = null;
+      testOutputFor = null;
+      setTestCaption('');
       setTestsBusy(false);
       setTestsState(`ошибка: ${error.message || error}`);
       setTestBadge(false);
@@ -707,16 +737,15 @@ function runAllTests() {
 
 function onTestDone(message) {
   const name = String(message.name || '');
-  if (testsCurrent && name && name !== testsCurrent) return;
+  if (!currentTest || name !== currentTest) return;
   const ok = Boolean(message.ok);
   const code = message.code !== undefined ? message.code : '?';
   const duration = message.duration_s !== undefined ? Number(message.duration_s) : 0;
-  testsCurrent = null;
   setTestsBusy(false);
   setTestBadge(ok);
-  setTestsState(`${name || 'тест'}: ${ok ? 'PASS' : 'FAIL'} · ${duration.toFixed(2)} с`);
+  setTestsState(`${name}: ${ok ? 'PASS' : 'FAIL'} · ${duration.toFixed(2)} с`);
   appendTestOutput(
-    `=== ${name || 'тест'}: ${ok ? 'PASS' : 'FAIL'} (code ${code}, ${duration.toFixed(2)} с) ===`,
+    `=== ${name}: ${ok ? 'PASS' : 'FAIL'} (code ${code}, ${duration.toFixed(2)} с) ===`,
   );
   const hasQueue = testsQueue.length > 0;
   loadTests().then(() => {
@@ -729,6 +758,7 @@ function initTests() {
   if (ui.testsRunAll) ui.testsRunAll.addEventListener('click', runAllTests);
   setTestsBusy(false);
   setTestBadge(null);
+  setTestCaption('');
 }
 
 /* --- пробелы --- */

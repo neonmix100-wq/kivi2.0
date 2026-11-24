@@ -159,11 +159,31 @@ def main() -> int:
         js = (PROJECT_ROOT / "app" / "renderer" / "app.js").read_text(encoding="utf-8")
         ok &= check("HTML: tests-list", 'id="tests-list"' in html)
         ok &= check("HTML: tests-output", 'id="tests-output"' in html)
+        ok &= check("HTML: tests-caption", 'id="tests-caption"' in html)
         ok &= check("HTML: Прогнать все", "Прогнать все" in html)
         ok &= check("JS: list_tests", "list_tests" in js)
         ok &= check("JS: run_test", "run_test" in js)
         ok &= check("JS: test_line", "test_line" in js)
         ok &= check("JS: test_done", "test_done" in js)
+        ok &= check("JS: currentTest", "currentTest" in js)
+        ok &= check(
+            "JS: очистка консоли при старте",
+            "ui.testsOutput.textContent = ''" in js and "beginTestOutput(name)" in js,
+        )
+        ok &= check(
+            "JS: очистка после accepted run_test",
+            "reply.started === true" in js and "beginTestOutput(name)" in js,
+        )
+        ok &= check(
+            "JS: фильтр test_line по currentTest",
+            "if (currentTest && name !== currentTest) return;" in js,
+        )
+        ok &= check(
+            "JS: test_done только для currentTest",
+            "if (!currentTest || name !== currentTest) return;" in js,
+        )
+        ok &= check("JS: заголовок «Вывод: name»", "Вывод: ${name}" in js)
+        ok &= check("JS: старый testsCurrent удалён", "testsCurrent" not in js)
     finally:
         if client is not None:
             try:
@@ -179,5 +199,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-    raise TimeoutError(f"test_done {name} не пришёл")
