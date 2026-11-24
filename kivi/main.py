@@ -63,7 +63,7 @@ def create_api_server(stop_event: threading.Event, *, no_api: bool = False):
 
 
 def _warm_fillers() -> None:
-    """Фоновый прогрев библиотеки вводных для всех контекстов (TTS + LLM, один раз)."""
+    """Фоновый прогрев вводных и реплик fast-path (TTS + LLM, один раз)."""
     try:
         from kivi.tts.fillers import CONTEXTS, ensure_library
 
@@ -72,6 +72,15 @@ def _warm_fillers() -> None:
             logger.info("вводные: {} готовы ({} фраз)", context, len(library))
     except Exception as exc:  # noqa: BLE001 - вводные не критичны для запуска
         logger.warning("вводные: прогрев не удался: {}: {}", type(exc).__name__, exc)
+    try:
+        from kivi.tts import replies
+
+        index = replies.ensure_replies()
+        total = sum(len(items) for items in index.values())
+        kinds = "/".join(kind for kind in index)
+        logger.info("реплики: {} готовы ({} фраз)", kinds, total)
+    except Exception as exc:  # noqa: BLE001 - реплики не критичны для запуска
+        logger.warning("реплики: прогрев не удался: {}: {}", type(exc).__name__, exc)
 
 
 def _reporter(loop: WakeLoop, router: Router, stop: threading.Event) -> None:

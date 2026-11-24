@@ -4,9 +4,9 @@
     python tests/smoke_tts_stream.py
 
 Что проверяется:
-  1) ответ режется на крупные чанки (200-300 символов), пунктуация сохранена;
-  2) вводная НЕ звучит, если первый чанк готов быстрее 1.5 с;
-  3) вводная звучит РОВНО один раз, если первый чанк медленнее 1.5 с;
+  1) ответ режется на короткий первый чанк (<= 60 символов) и крупные остальные;
+  2) вводная НЕ звучит, если первый чанк готов быстрее 2.5 с;
+  3) вводная звучит РОВНО один раз, если первый чанк медленнее 2.5 с;
   4) 12 вводных подряд реально проигрываются: слышны разные, лог — по факту;
   5) если в списке одна фраза — не играем ничего (None), а не повторяем её.
 
@@ -84,7 +84,9 @@ def check_chunking(ok: list[bool]) -> None:
     ok.append(FIRST_CHUNK_MIN <= len(chunks[0]) <= FIRST_CHUNK_MAX)
     ok.append(all(TARGET_CHUNK_CHARS <= len(c) <= MAX_CHUNK_CHARS for c in chunks[1:-1]))
     ok.append(" ".join(" ".join(chunks).split()) == " ".join(TEXT.split()))
-    ok.append(all(c.rstrip()[-1] in ".!?…" for c in chunks[:-1]))
+    # первый чанк может быть срезом по словам (быстрый старт),
+    # остальные обязаны заканчиваться знаком конца предложения
+    ok.append(all(c.rstrip()[-1] in ".!?…" for c in chunks[1:-1]))
     for chunk in chunks:
         print(f"    {len(chunk):3d} | {chunk[:70]}…")
 
@@ -126,15 +128,15 @@ def main() -> int:
         ok.append(fast._first_sound_at is not None)
         ok.append((fast._first_sound_at or 0) - started < 1.5)
 
-        # --- сценарий B: первый чанк медленный, вводная обязательна ---
-        print("\n[3] медленный ответ (2.2 с на первый чанк) — ждём одну вводную")
-        stream_mod.synthesize_mp3 = make_fake_synth([2.2, 0.2], sample)  # type: ignore[assignment]
+        # --- сценарий B: LLM молчит дольше порога, вводная обязательна ---
+        print("\n[3] медленный ответ (LLM молчит 3 с) — ждём одну вводную")
+        stream_mod.synthesize_mp3 = make_fake_synth([0.2], sample)  # type: ignore[assignment]
         slow = SentenceSpeaker(started_at=time.perf_counter())
+        # Текст ещё не пришёл: очередь пуста, значит вводная должна звучать.
+        time.sleep(2.9)
+        ack_before_finish = slow._ack_played
         for chunk in TEXT.split(". "):
             slow.feed(chunk + ". ")
-        # LLM ещё «генерирует»: finish() наступит позже порога вводной
-        time.sleep(1.8)
-        ack_before_finish = slow._ack_played
         total_slow = slow.finish()
         print(
             f"    ack_played={slow._ack_played} (до finish: {ack_before_finish}), "

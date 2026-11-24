@@ -24,6 +24,8 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -32,11 +34,13 @@ from loguru import logger
 from kivi.audio.capture import AudioCapture
 from kivi.audio.recorder import Recorder, Utterance
 from kivi.audio.vad import VAD
+from kivi.brain import fastpath
 from kivi.brain.persona import PERSONA_PROMPT, to_speech
 from kivi.brain.session import Session
 from kivi.config import LOG_DIR_PATH as LOG_DIR
 from kivi.config import Settings, get_settings
 from kivi.stt.local import transcribe_wav
+from kivi.tts import replies
 from kivi.tts.stream import SentenceSpeaker
 from kivi.wake.detector import WakeMatch, detect
 
@@ -53,6 +57,7 @@ __all__ = [
     "FOLLOWUP_WINDOW_S",
     "GREETING_PHRASES",
     "MAX_UTTERANCE_S",
+    "MEMORY_BUDGET_S",
     "MIN_UTTERANCE_S",
     "WAKE_LOG",
     "WakeLoop",
@@ -64,6 +69,7 @@ WARMUP_SECONDS = 0.25
 MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 15.0
 COOLDOWN_S = 1.5
+MEMORY_BUDGET_S = 0.8  # больше не ждём память перед первым звуком
 DIALOG_SILENCE_S = 8.0
 DIALOG_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя, оставлено для совместимости
 FOLLOWUP_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя
@@ -234,6 +240,10 @@ class WakeLoop:
         # Очередь turn'ов: голос и текст не должны отвечать одновременно.
         self._turn_lock = threading.RLock()
         self.paused = False
+        # Замеры последнего turn: уходят в лог и в событие turn для UI.
+        self._memory_ms = 0
+        self._tts_first_ms = -1
+        self._last_fast_timing: dict[str, int] = {}
         try:
             from kivi.skills.broker import set_listen_callback, set_vision_router
 
@@ -617,11 +627,31 @@ class WakeLoop:
         started = time.perf_counter()
         route = "chat"
         response = ""
+        timing = {"planner_ms": 0, "memory_ms": 0, "first_sound_ms": -1, "tts_first_ms": -1}
+        fast_kind = ""
         with self._turn_lock:
             self.state = "THINKING"
             session = self._get_session()
             try:
+                # Тривиальные реплики («привет», «спасибо») — без planner и LLM.
+                fast = fastpath.fast_route(text)
+                fast_kind = str((fast or {}).get("fast") or "")
+                if fast_kind:
+                    fast_reply = self._fast_reply(
+                        text, fast_kind, src, speak=bool(speak), started=started
+                    )
+                    if fast_reply is not None:
+                        response = fast_reply
+                        timing.update(self._last_fast_timing or {})
+                        self.state = "IDLE"
+                        self._log_turn(src, route, started, response, timing, fast_kind)
+                        return response, route
+
+                plan_started = time.perf_counter()
                 plan = self._plan_skill(text, session.history())
+                timing["planner_ms"] = int((time.perf_counter() - plan_started) * 1000.0)
+                self._memory_ms = 0
+                self._tts_first_ms = -1
                 route = str((plan or {}).get("route") or "chat")
                 if route not in ("skill", "search", "action_gap", "chat"):
                     route = "chat"
@@ -647,6 +677,10 @@ class WakeLoop:
                     response = self._answer_chat_collect(
                         text, plan, started, speak=bool(speak)
                     )
+                timing["memory_ms"] = int(self._memory_ms)
+                if self._tts_first_ms >= 0:
+                    timing["tts_first_ms"] = int(self._tts_first_ms)
+                    timing["first_sound_ms"] = int(self._tts_first_ms)
             except Exception as exc:  # noqa: BLE001 - ответ должен вернуться в API
                 wake_log.error(
                     "handle_command {}: {}: {}",
@@ -661,26 +695,122 @@ class WakeLoop:
                 session.add("assistant", response, route=route, source=src)
                 if src == "voice":
                     self._open_window()
-                self._emit_turn("user", text, route, src)
-                self._emit_turn("kivi", response, route, src)
+                self._emit_turn("user", text, route, src, fast=fast_kind or None)
+                self._emit_turn(
+                    "kivi",
+                    response,
+                    route,
+                    src,
+                    fast=fast_kind or None,
+                    first_sound_ms=timing["first_sound_ms"],
+                    tts_first_ms=timing["tts_first_ms"],
+                )
                 self._note_turn()
             if src == "voice":
                 self._drain()
                 self.vad.reset()
             self.state = "IDLE"
-            wake_log.info(
-                "turn: source={}, route={}, {:.0f} мс, ответ {!r}",
-                src,
-                route,
-                (time.perf_counter() - started) * 1000.0,
-                response[:80],
-            )
+            self._log_turn(src, route, started, response, timing, fast_kind)
         return response, route
 
-    def _emit_turn(
-        self, role: str, text: str, route: str, source: str
+    def _log_turn(
+        self,
+        source: str,
+        route: str,
+        started: float,
+        response: str,
+        timing: dict[str, int],
+        fast_kind: str = "",
     ) -> None:
-        """Отправить turn всем WS-клиентам (голос и текст)."""
+        """Единый turn-лог с замерами задержек (мс)."""
+        wake_log.info(
+            "turn: source={}, route={}, fast={}, {:.0f} мс, "
+            "planner_ms={}, memory_ms={}, first_sound_ms={}, tts_first_ms={}, ответ {!r}",
+            source,
+            route,
+            fast_kind or "-",
+            (time.perf_counter() - started) * 1000.0,
+            int(timing.get("planner_ms", 0)),
+            int(timing.get("memory_ms", 0)),
+            int(timing.get("first_sound_ms", -1)),
+            int(timing.get("tts_first_ms", -1)),
+            str(response or "")[:80],
+        )
+
+    def _fast_reply(
+        self,
+        command: str,
+        kind: str,
+        source: str,
+        *,
+        speak: bool,
+        started: float,
+        emit: bool = True,
+    ) -> str | None:
+        """Мгновенный ответ из библиотеки реплик: без LLM и без синтеза.
+
+        None — библиотека не готова (тогда команда идёт обычным путём).
+        В библиотеке только социальные фразы, фактов там нет.
+        emit=False — turn-события отправит вызывающий код (без дублей).
+        """
+        item = replies.pick(kind)
+        if item is None:
+            wake_log.debug("fast-path: библиотека реплик не готова ({})", kind)
+            return None
+        text, mp3 = item
+        session = self._get_session()
+        self.window_until = 0.0
+        session.add("user", command, route="chat", source=source)
+        session.add("assistant", text, route="chat", source=source)
+        if emit:
+            # UI получает ответ сразу, озвучка идёт следом.
+            self._emit_turn("user", command, "chat", source, fast=kind)
+            self._emit_turn("kivi", text, "chat", source, fast=kind)
+        first_ms = 0
+        if speak:
+            first_ms = self._play_reply(mp3, started=started)
+        if source == "voice":
+            self._open_window()
+            self._drain()
+            self.vad.reset()
+        self._note_turn()
+        self._last_fast_timing = {
+            "planner_ms": 0,
+            "memory_ms": 0,
+            "first_sound_ms": first_ms,
+            "tts_first_ms": -1,
+        }
+        return text
+
+    def _play_reply(self, mp3: str, *, started: float) -> int:
+        """Проиграть готовый mp3 из кэша; вернуть мс до старта воспроизведения.
+
+        Синтеза здесь нет: файл уже на диске — в этом и выигрыш fast-path.
+        Декодирование mp3 идёт внутри плеера.
+        """
+        from kivi.tts.speak import play_file
+
+        try:
+            from kivi.audio.output import resolve_output_device
+
+            resolve_output_device()  # устройство обычно уже в кэше (TTL 2 с)
+        except Exception as exc:  # noqa: BLE001 - плеер сам выберет выход
+            wake_log.debug("fast-path: выход не подтверждён: {}", exc)
+        first_ms = int((time.perf_counter() - started) * 1000.0)
+        try:
+            play_file(mp3)
+        except Exception as exc:  # noqa: BLE001 - текст готов, звук не критичен
+            wake_log.warning("fast-path: реплику не удалось проиграть: {}", exc)
+        return first_ms
+
+    def _emit_turn(
+        self, role: str, text: str, route: str, source: str, **extra: object
+    ) -> None:
+        """Отправить turn всем WS-клиентам (голос и текст).
+
+        extra: fast / first_sound_ms / tts_first_ms — только для логов UI,
+        рендер их не требует.
+        """
         api = getattr(self, "api", None)
         if api is None:
             return
@@ -692,6 +822,7 @@ class WakeLoop:
             "route": str(route or ""),
             "source": str(source or ""),
         }
+        payload.update({key: value for key, value in extra.items() if value is not None})
         try:
             if hasattr(api, "broadcast_turn"):
                 api.broadcast_turn(
@@ -700,6 +831,7 @@ class WakeLoop:
                     ts=payload["ts"],
                     route=str(route or ""),
                     source=str(source or ""),
+                    **{key: value for key, value in extra.items() if value is not None},
                 )
             elif hasattr(api, "broadcast"):
                 api.broadcast(payload)
@@ -736,7 +868,20 @@ class WakeLoop:
 
     def _answer_chat(self, command: str, plan: dict | None, started: float) -> str:
 
-        """Разговорный путь: один стрим Router -> SentenceSpeaker."""
+        """Разговорный путь: один стрим Router -> SentenceSpeaker.
+
+        «Киви, привет» приходит сюда напрямую из wake-цикла, поэтому
+        тривиальные реплики отвечаем из кэша, не дожидаясь LLM.
+        """
+        fast = fastpath.fast_route(command)
+        fast_kind = str((fast or {}).get("fast") or "")
+        if fast_kind:
+            reply = self._fast_reply(
+                command, fast_kind, "voice", speak=True, started=started, emit=False
+            )
+            if reply is not None:
+                wake_log.info("fast-path: {} -> {!r}", fast_kind, reply)
+                return reply
         session = self._get_session()
         memory = self._memory_block(command)
         system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
@@ -873,6 +1018,7 @@ class WakeLoop:
                 except Exception as exc:  # noqa: BLE001
                     wake_log.error("озвучка стрима упала: {}", exc)
                 finally:
+                    self._tts_first_ms = speaker.first_sound_ms
                     self._speaking = False
                     self._speaker = None
         return "".join(parts).strip()
@@ -925,6 +1071,7 @@ class WakeLoop:
             except Exception as exc:  # noqa: BLE001
                 wake_log.error("озвучка поиска упала: {}", exc)
             finally:
+                self._tts_first_ms = speaker.first_sound_ms
                 self._speaking = False
                 self._speaker = None
         wake_log.info("поиск: ответ {!r}", text[:80])
@@ -1012,6 +1159,7 @@ class WakeLoop:
             except Exception as exc:  # noqa: BLE001
                 wake_log.error("озвучка пробела упала: {}", exc)
             finally:
+                self._tts_first_ms = speaker.first_sound_ms
                 self._speaking = False
                 self._speaker = None
         return text
@@ -1192,18 +1340,41 @@ class WakeLoop:
     # --- долгая память ---
 
     def _memory_block(self, query: str) -> str:
-        """Блок памяти для системного промпта (пусто, если vault пуст)."""
+        """Блок памяти для системного промпта (пусто, если vault пуст).
+
+        Жёсткий бюджет MEMORY_BUDGET_S: память не должна задерживать первый
+        звук. Не уложились — отвечаем без блока и пишем предупреждение.
+        """
+        self._memory_ms = 0
         if not self.memory_enabled:
             return ""
-        try:
+        started = time.perf_counter()
+
+        def _build() -> str:
             from kivi.memory.inject import build_memory_block
 
-            block = build_memory_block(query)
+            return str(build_memory_block(query) or "")
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kivi-memory")
+        try:
+            future = executor.submit(_build)
+            block = future.result(timeout=MEMORY_BUDGET_S)
+        except FuturesTimeoutError:
+            self._memory_ms = int((time.perf_counter() - started) * 1000.0)
+            wake_log.warning(
+                "память: пропуск по бюджету {:.1f}с — отвечаю без блока памяти",
+                MEMORY_BUDGET_S,
+            )
+            return ""
         except Exception as exc:  # noqa: BLE001 - память не должна ломать диалог
             wake_log.warning("память: блок не собран: {}: {}", type(exc).__name__, exc)
+            self._memory_ms = int((time.perf_counter() - started) * 1000.0)
             return ""
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        self._memory_ms = int((time.perf_counter() - started) * 1000.0)
         if block:
-            wake_log.debug("память: блок {} символов", len(block))
+            wake_log.debug("память: блок {} символов за {} мс", len(block), self._memory_ms)
         return block
 
     def _note_turn(self) -> None:

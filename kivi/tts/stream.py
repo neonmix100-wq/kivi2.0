@@ -2,9 +2,10 @@
 
 Отличия от покадрового ffplay:
   * один sounddevice.OutputStream на весь ответ (плеер не перезапускаем);
-  * чанки ~2-3 предложения (200-300 символов), чтобы реже сбрасывать просодию;
+  * первый чанк — не длиннее 60 символов: короткий первый звук без потери смысла,
+    остальные чанки крупнее (2-3 предложения), чтобы реже сбрасывать просодию;
   * между чанками кроссфейд 30 мс — нет щелчка и рваного стыка;
-  * если первый чанк не готов за 1.5 с — один раз звучит короткая вводная
+  * если первый чанк не готов за 2.5 с — один раз звучит короткая вводная
     из библиотеки kivi.tts.fillers (контекст: think/search/code) тем же
     потоком; фраза запоминается как «сыгранная» и не повторяется подряд,
     а если вариантов нет — вводная не играется вовсе.
@@ -56,12 +57,12 @@ __all__ = [
 ]
 
 MIN_SENTENCE_CHARS = 20
-FIRST_CHUNK_MIN = 120  # первый чанк: копим хотя бы столько символов
-FIRST_CHUNK_MAX = 200  # ...и не больше — чтобы раньше прозвучал первый звук
+FIRST_CHUNK_MIN = 20  # первое предложение берём, если в нём есть хотя бы столько
+FIRST_CHUNK_MAX = 60  # первый чанк — не длиннее: быстрее первый звук
 TARGET_CHUNK_CHARS = 250  # 2-3 предложения в чанке
 MAX_CHUNK_CHARS = 320
 OVERLAP_MS = 30  # кроссфейд на стыке чанков
-ACK_DELAY_S = 1.5
+ACK_DELAY_S = 2.5  # вводная звучит, только если ответ молчит дольше
 
 _SENTENCE_END = re.compile(r"[.!?…]+[\"'»)]?(?=\s)|\n+")
 _COMMA = ",;:"
@@ -89,6 +90,7 @@ class SentenceSpeaker:
         transform: Callable[[str], str] | None = None,
         ack_delay_s: float = ACK_DELAY_S,
         context: str = "think",
+        fast_kind: str | None = None,
     ) -> None:
         self.run_id = uuid.uuid4().hex[:8]
         self.model_id, self.voice_id = _tts_settings(model, voice)
@@ -96,6 +98,8 @@ class SentenceSpeaker:
         self.started_at = started_at if started_at is not None else time.perf_counter()
         self.ack_delay_s = float(ack_delay_s)
         self.context = fillers.normalize_context(context)
+        # fast-path (привет/спасибо): ответ уже готов, вводная только мешает
+        self.fast_kind = str(fast_kind or "").strip() or None
 
         self._device_index, self._device_name, self._device_sr = resolve_output_device()
         self._ref = get_playback_ref(int(get_settings().audio.capture_samplerate))
@@ -177,22 +181,24 @@ class SentenceSpeaker:
                 self._text_q.put(piece)
 
     def _extract_chunk(self) -> str | None:
-        """Выделить готовый чанк: 2-3 предложения (200-320 символов).
+        """Выделить готовый чанк: первый — короткий, дальше 2-3 предложения.
 
-        Первый чанк короче (~120-200 символов): он определяет, как быстро
-        зазвучит ответ. Остальные — крупнее, чтобы реже сбрасывать просодию.
+        Первый чанк ограничен FIRST_CHUNK_MAX (60 символов): он определяет,
+        как быстро зазвучит ответ. Остальные крупнее, чтобы реже сбрасывать
+        просодию.
         """
         text = self._buffer
-        limit = FIRST_CHUNK_MIN if self._first else TARGET_CHUNK_CHARS
-        if len(text) < limit:
-            return None
-
-        window = text[: FIRST_CHUNK_MAX if self._first else MAX_CHUNK_CHARS]
-        bounds = [match.end() for match in _SENTENCE_END.finditer(window)]
         if self._first:
-            cut = bounds[-1] if bounds and bounds[-1] >= limit else self._soft_cut(window)
+            piece = self._first_piece(text)
+            if piece is None:
+                return None
+            cut = len(piece)
             self._first = False
         else:
+            if len(text) < TARGET_CHUNK_CHARS:
+                return None
+            window = text[:MAX_CHUNK_CHARS]
+            bounds = [match.end() for match in _SENTENCE_END.finditer(window)]
             long_enough = [end for end in bounds if end >= TARGET_CHUNK_CHARS]
             if long_enough:
                 cut = long_enough[0]
@@ -203,6 +209,18 @@ class SentenceSpeaker:
         part = text[:cut].strip()
         self._buffer = text[cut:]
         return part or None
+
+    @staticmethod
+    def _first_piece(text: str) -> str | None:
+        """Первый чанк: законченное предложение, иначе резка по 60 символам."""
+        window = text[:FIRST_CHUNK_MAX]
+        bounds = [match.end() for match in _SENTENCE_END.finditer(window)]
+        usable = [end for end in bounds if end >= min(FIRST_CHUNK_MIN, MIN_SENTENCE_CHARS)]
+        if usable:
+            return text[: usable[0]]
+        if len(text) <= FIRST_CHUNK_MAX:
+            return None  # ждём ещё текста: резать нечего
+        return text[: SentenceSpeaker._soft_cut(window)]
 
     @staticmethod
     def _soft_cut(window: str) -> int:
@@ -290,6 +308,10 @@ class SentenceSpeaker:
         """Вводная фраза, если первый чанк не успел за ack_delay_s."""
         if self._stopping.is_set() or self._first_ready.is_set():
             return
+        if self.fast_kind:
+            return  # ответ fast-path уже готов — вводная только задержит
+        if not self._audio_q.empty() or not self._text_q.empty():
+            return  # первый чанк уже в работе (синтез или очередь) — молчим
         text = fillers.pick(self.context)
         if text is None:
             return
@@ -517,6 +539,13 @@ class SentenceSpeaker:
     @property
     def sentences(self) -> int:
         return self._chunk_count
+
+    @property
+    def first_sound_ms(self) -> int:
+        """Мс от старта ответа до первого звука; -1 — звука ещё не было."""
+        if self._first_sound_at is None:
+            return -1
+        return int((self._first_sound_at - self.started_at) * 1000.0)
 
     @property
     def played_seconds(self) -> float:

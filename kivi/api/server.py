@@ -316,18 +316,25 @@ class ApiServer:
         ts: float,
         route: str,
         source: str,
+        **extra: object,
     ) -> bool:
-        """Событие turn для UI: обе роли, голос и текст."""
-        return self.broadcast(
-            {
-                "event": "turn",
-                "role": str(role),
-                "text": str(text),
-                "ts": float(ts),
-                "route": str(route or ""),
-                "source": str(source or ""),
-            }
-        )
+        """Событие turn для UI: обе роли, голос и текст.
+
+        extra — необязательные поля замера (fast, first_sound_ms, ...):
+        рендер их игнорирует, но по ним удобно смотреть задержки в логах UI.
+        """
+        payload: dict[str, object] = {
+            "event": "turn",
+            "role": str(role),
+            "text": str(text),
+            "ts": float(ts),
+            "route": str(route or ""),
+            "source": str(source or ""),
+        }
+        for key, value in extra.items():
+            if value is not None:
+                payload[str(key)] = value
+        return self.broadcast(payload)
 
     async def _enqueue_all(self, payload: str, *, skip_if_full: bool) -> None:
         """Разложить событие по очередям клиентов (INFO при переполнении режем)."""
