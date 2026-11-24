@@ -180,9 +180,11 @@ fallback_local_and_warn`.
 | `kivi/stt/transcribe.py` | Резервное распознавание через OpenAI-совместимый endpoint |
 | `kivi/tts/speak.py` | TTS → MP3 → PCM 48 кГц → наушники |
 | `kivi/tts/cache.py` | Кэш фиксированных TTS-фраз `data/tts_cache` |
-| `kivi/tts/stream.py` | Непрерывный OutputStream, чанки и кроссфейд |
+| `kivi/tts/stream.py` | Непрерывный OutputStream, первый чанк ≤60 симв., кроссфейд |
 | `kivi/tts/fillers.py` | Библиотека вводных фраз и её прогрев |
+| `kivi/tts/replies.py` | Готовые реплики fast-path (привет/спасибо/smalltalk) |
 | `kivi/brain/router.py` | Маршрутизация задач, тиры, эскалация, стриминг |
+| `kivi/brain/fastpath.py` | Мгновенный маршрут тривиальных реплик без LLM |
 | `kivi/brain/providers.py` | Polza/OpenAI-совместимый HTTP-провайдер |
 | `kivi/brain/budget.py` | Учёт рублей в SQLite, лимит до запроса |
 | `kivi/brain/session.py` | История SQLite `messages`/`sessions`, `route`/`source` |
@@ -431,6 +433,13 @@ timeout 300 с.
   ответ на команду; «не умею» только для `action_gap`.
 - Вводные фразы: библиотека законченных предложений (think/search/code), кэш
   `data/tts_cache/fillers`, кэп 12, прогрев строго фоновый, `pick` не блокирует.
+- Fast-path: «привет / спасибо / как дела» отвечаются из кэша
+  `data/tts_cache/replies` без planner, LLM и синтеза — первый звук < 300 мс
+  (`kivi/brain/fastpath.py` + `kivi/tts/replies.py`, прогрев в `kivi/main.py`).
+- Память в промпте: бюджет 0.8 с; не уложились — отвечаем без блока и пишем
+  «память: пропуск по бюджету» в `wake.log`.
+- Первый чанк TTS ≤ 60 символов; вводная звучит, только если LLM молчит
+  дольше 2.5 с и ни одного чанка ещё нет в очереди.
 - Поиск: `reformulate_query(command, history)` → чистый запрос; retry при
   `NOT_FOUND`; summary с историей; по сырой реплике не искать.
 - Диалог: окно = тишина `silence_s=8` после её ответа; конец по фразам
@@ -461,7 +470,9 @@ timeout 300 с.
 2) зрение (скриншоты, vision-тир).
 Позже: установка скиллов с GitHub и генерация скиллов через OpenCode
 (требуют оверлей), barge-in, хоткеи.
-Непрерывный TTS + кроссфейд уже есть; первый звук 3-7с — потолок провайдера TTS.
+Непрерывный TTS + кроссфейд уже есть; тривиальные реплики («привет», «спасибо»)
+звучат из кэша почти сразу, у остальных ответов первый звук 3-7 с — потолок
+провайдера TTS.
 
 Дополнительно:
 
