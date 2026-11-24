@@ -80,6 +80,6 @@ function bind(){
  on("theme-export",exportTheme);
  on("theme-import",importTheme);
 }
-window.KiviTheme={apply,get state(){return state;},presets:PRESETS};
+window.KiviTheme={apply,randomize,exportTheme,importTheme,get state(){return state;},presets:PRESETS};
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",()=>{bind();apply();});else{bind();apply();}
 })();
