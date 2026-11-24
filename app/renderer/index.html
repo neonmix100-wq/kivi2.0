@@ -109,7 +109,7 @@
           <div class="page-head">
             <div>
               <h1>Настройки</h1>
-              <p>Тема и шрифт интерфейса. Хранится в localStorage.</p>
+              <p>Тема, шрифт и запуск smoke-тестов. Тема хранится в localStorage.</p>
             </div>
           </div>
 
@@ -147,6 +147,25 @@
               <button class="font-tile" data-font="verdana"><span class="font-preview font-verdana">Kivi</span><span>Verdana</span></button>
               <button class="font-tile" data-font="georgia"><span class="font-preview font-georgia">Kivi</span><span>Georgia</span></button>
             </div>
+          </article>
+
+          <article class="panel tests-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Тесты</h2>
+                <p class="muted tests-hint">Каждый файл tests/smoke_*.py запускается отдельно, по одному.</p>
+              </div>
+              <div class="tests-actions">
+                <button class="ghost-btn" id="btn-tests-refresh">Обновить</button>
+                <button class="ghost-btn" id="btn-tests-run-all">Прогнать все</button>
+              </div>
+            </div>
+            <div class="tests-list" id="tests-list"></div>
+            <div class="tests-console-head">
+              <span class="muted" id="tests-state">Загружаю список…</span>
+              <span class="test-badge" id="tests-badge" hidden></span>
+            </div>
+            <pre class="log-view test-output" id="tests-output"></pre>
           </article>
         </section>
 

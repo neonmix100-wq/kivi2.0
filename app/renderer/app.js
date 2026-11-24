@@ -55,6 +55,12 @@ const ui = {
   chatForm: $('#chat-form'),
   chatInput: $('#chat-input'),
   chatState: $('#chat-state'),
+  testsList: $('#tests-list'),
+  testsState: $('#tests-state'),
+  testsBadge: $('#tests-badge'),
+  testsOutput: $('#tests-output'),
+  testsRefresh: $('#btn-tests-refresh'),
+  testsRunAll: $('#btn-tests-run-all'),
 };
 
 let socket = null;
@@ -63,6 +69,10 @@ let pendingRequest = null;
 let volumeDragging = false;
 let toastTimer = null;
 let memoryKind = 'profile';
+let testsKnown = [];
+let testsRunning = false;
+let testsCurrent = null;
+let testsQueue = [];
 
 /* --- тема и шрифт --- */
 
@@ -226,7 +236,7 @@ function updateStatus(status) {
 
 function handleMessage(message) {
   if (!message || typeof message !== 'object') return;
-  if ('ok' in message) {
+  if (!message.event && 'ok' in message) {
     if (pendingRequest) {
       const pending = pendingRequest;
       pendingRequest = null;
@@ -255,6 +265,12 @@ function handleMessage(message) {
       }
       noteEvent(`turn: ${message.role} · ${message.source || ''}`);
       break;
+    case 'test_line':
+      appendTestOutput(String(message.line || ''));
+      break;
+    case 'test_done':
+      onTestDone(message);
+      break;
     default:
       break;
   }
@@ -272,6 +288,8 @@ function connect() {
     setConnection(true);
     request('get_status').catch(() => {});
     loadLogs();
+    const settingsPage = $('#page-settings');
+    if (settingsPage && settingsPage.classList.contains('active')) loadTests();
   });
   socket.addEventListener('message', (event) => {
     let message = null;
@@ -543,6 +561,176 @@ function initSkills() {
   if (refresh) refresh.addEventListener('click', loadSkills);
 }
 
+/* --- настройки: запуск smoke-тестов --- */
+
+function setTestsState(text) {
+  if (ui.testsState) ui.testsState.textContent = text;
+}
+
+function setTestBadge(ok) {
+  if (!ui.testsBadge) return;
+  if (ok === null || ok === undefined) {
+    ui.testsBadge.hidden = true;
+    ui.testsBadge.textContent = '';
+    ui.testsBadge.classList.remove('pass', 'fail');
+    return;
+  }
+  ui.testsBadge.hidden = false;
+  ui.testsBadge.textContent = ok ? 'PASS' : 'FAIL';
+  ui.testsBadge.classList.toggle('pass', Boolean(ok));
+  ui.testsBadge.classList.toggle('fail', !ok);
+}
+
+function appendTestOutput(line) {
+  if (!ui.testsOutput) return;
+  const view = ui.testsOutput;
+  const nearBottom = view.scrollTop + view.clientHeight >= view.scrollHeight - 40;
+  view.textContent += (view.textContent ? '\n' : '') + String(line);
+  const lines = view.textContent.split('\n');
+  if (lines.length > 2000) view.textContent = lines.slice(-2000).join('\n');
+  if (nearBottom) view.scrollTop = view.scrollHeight;
+}
+
+function setTestsBusy(busy) {
+  testsRunning = Boolean(busy);
+  if (ui.testsRunAll) ui.testsRunAll.disabled = testsRunning;
+  if (ui.testsRefresh) ui.testsRefresh.disabled = testsRunning;
+  $$('.test-run').forEach((button) => {
+    button.disabled = testsRunning;
+  });
+}
+
+function renderTests(names) {
+  if (!ui.testsList) return;
+  ui.testsList.replaceChildren();
+  if (!names.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'Файлы tests/smoke_*.py не найдены.';
+    ui.testsList.append(empty);
+    return;
+  }
+  names.forEach((name) => {
+    const row = document.createElement('div');
+    row.className = 'test-row';
+    const label = document.createElement('span');
+    label.className = 'test-name';
+    label.title = `tests/${name}.py`;
+    label.textContent = name;
+    const button = document.createElement('button');
+    button.className = 'ghost-btn test-run';
+    button.textContent = 'Запустить';
+    button.disabled = testsRunning;
+    button.addEventListener('click', () => startTest(name));
+    row.append(label, button);
+    ui.testsList.append(row);
+  });
+}
+
+function loadTests() {
+  if (!ui.testsList) return Promise.resolve([]);
+  if (!testsRunning) ui.testsList.textContent = 'Загружаю…';
+  return request('list_tests')
+    .then((reply) => {
+      if (!reply || reply.ok === false) throw new Error(reply && reply.error ? reply.error : 'ошибка');
+      testsKnown = Array.isArray(reply.tests) ? reply.tests.map(String) : [];
+      renderTests(testsKnown);
+      if (!testsRunning) setTestsState(`тестов: ${testsKnown.length}`);
+      return testsKnown;
+    })
+    .catch((error) => {
+      testsKnown = [];
+      if (ui.testsList) ui.testsList.textContent = 'Нет связи с ядром.';
+      setTestsState(`ошибка: ${error.message || error}`);
+      return [];
+    });
+}
+
+function startTest(name, fromQueue = false) {
+  if (testsRunning) return;
+  if (!testsKnown.includes(name)) {
+    setTestsState(`неизвестный тест: ${name}`);
+    return;
+  }
+  if (!fromQueue) testsQueue = [];
+  testsCurrent = name;
+  setTestsBusy(true);
+  setTestBadge(null);
+  setTestsState(`запуск ${name}…`);
+  appendTestOutput(`\n=== ${name} ===`);
+  request('run_test', { name })
+    .then((reply) => {
+      if (!reply || reply.ok === false) {
+        const message = reply && reply.error ? reply.error : 'не удалось запустить';
+        testsCurrent = null;
+        setTestsBusy(false);
+        setTestsState(message);
+        setTestBadge(false);
+        appendTestOutput(`ERROR: ${message}`);
+        if (testsQueue.length) setTimeout(startNextTest, 150);
+      }
+    })
+    .catch((error) => {
+      testsCurrent = null;
+      setTestsBusy(false);
+      setTestsState(`ошибка: ${error.message || error}`);
+      setTestBadge(false);
+      appendTestOutput(`ERROR: ${error.message || error}`);
+      if (testsQueue.length) setTimeout(startNextTest, 150);
+    });
+}
+
+function startNextTest() {
+  if (testsRunning) return;
+  const next = testsQueue.shift();
+  if (!next) {
+    setTestsState('очередь завершена');
+    setTestsBusy(false);
+    return;
+  }
+  startTest(next, true);
+}
+
+function runAllTests() {
+  if (testsRunning) return;
+  if (!testsKnown.length) {
+    loadTests().then((names) => {
+      if (!names.length) return;
+      testsQueue = names.slice();
+      startNextTest();
+    });
+    return;
+  }
+  testsQueue = testsKnown.slice();
+  startNextTest();
+}
+
+function onTestDone(message) {
+  const name = String(message.name || '');
+  if (testsCurrent && name && name !== testsCurrent) return;
+  const ok = Boolean(message.ok);
+  const code = message.code !== undefined ? message.code : '?';
+  const duration = message.duration_s !== undefined ? Number(message.duration_s) : 0;
+  testsCurrent = null;
+  setTestsBusy(false);
+  setTestBadge(ok);
+  setTestsState(`${name || 'тест'}: ${ok ? 'PASS' : 'FAIL'} · ${duration.toFixed(2)} с`);
+  appendTestOutput(
+    `=== ${name || 'тест'}: ${ok ? 'PASS' : 'FAIL'} (code ${code}, ${duration.toFixed(2)} с) ===`,
+  );
+  const hasQueue = testsQueue.length > 0;
+  loadTests().then(() => {
+    if (hasQueue) startNextTest();
+  });
+}
+
+function initTests() {
+  if (ui.testsRefresh) ui.testsRefresh.addEventListener('click', () => loadTests());
+  if (ui.testsRunAll) ui.testsRunAll.addEventListener('click', runAllTests);
+  setTestsBusy(false);
+  setTestBadge(null);
+}
+
 /* --- пробелы --- */
 
 function makeGapButton(label, handler) {
@@ -790,6 +978,7 @@ function initNav() {
       if (page === 'memory') loadMemory(memoryKind);
       if (page === 'skills') loadSkills();
       if (page === 'gaps') loadGaps();
+      if (page === 'settings') loadTests();
     });
   });
   const refresh = $('#btn-refresh-logs');
@@ -850,6 +1039,7 @@ function init() {
   initGaps();
   initSchedule();
   initChat();
+  initTests();
   setConnection(false);
   connect();
 }

@@ -10,7 +10,7 @@
     ask{question,options}, confirm{title,body,details}, info{text},
     ask_response{id,answer}, confirm_response{id,ok}, set_volume{v},
     get_status, get_gaps{limit}, get_skills, set_skill_enabled{name,enabled},
-    test_skill{name}, close_gap{id}, attempt_gap{id}, get_memory{kind},
+    test_skill{name}, list_tests, run_test{name}, close_gap{id}, attempt_gap{id}, get_memory{kind},
     reflect_now, reminders_list, cancel_reminder{id}, tail_logs{n},
     send_text{text}, get_history{limit}, shutdown
 Ответ на команду: {ok, ...}.
@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -34,7 +37,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kivi.api.pending import PendingRegistry
-from kivi.config import CONFIG_PATH
+from kivi.config import CONFIG_PATH, PROJECT_ROOT
 from kivi.prefs import get_tts_volume, set_tts_volume
 
 try:  # websockets >= 13
@@ -57,6 +60,8 @@ DEFAULT_ASK_TIMEOUT_S = 60.0
 DEFAULT_CONFIRM_TIMEOUT_S = 120.0
 LOG_RING_SIZE = 200
 CLIENT_QUEUE_LIMIT = 200
+TEST_DIR = PROJECT_ROOT / "tests"
+TEST_TIMEOUT_S = 300.0
 
 
 class ApiConfig(BaseModel):
@@ -131,6 +136,9 @@ class ApiServer:
             ask_timeout_s=parsed.ask_timeout_s,
             confirm_timeout_s=parsed.confirm_timeout_s,
         )
+        self._test_lock = threading.Lock()
+        self._test_running: str | None = None
+        self._test_process: subprocess.Popen[str] | None = None
 
     # --- жизненный цикл ---
 
@@ -483,6 +491,138 @@ class ApiServer:
             return {"ok": False, "error": f"скилл {name!r} не найден"}
         return {"ok": True, "name": name, "message": f"Тест «{name}»: заглушка"}
 
+    # --- запуск smoke-тестов из UI ---
+
+    def list_tests(self) -> list[str]:
+        """Имена tests/smoke_*.py без пути и расширения, отсортированные."""
+        try:
+            root = TEST_DIR.resolve()
+            names = [
+                path.stem
+                for path in TEST_DIR.glob("smoke_*.py")
+                if path.is_file() and path.resolve().parent == root
+            ]
+        except OSError as exc:
+            logger.warning("тесты: не удалось прочитать {}: {}", TEST_DIR, exc)
+            return []
+        return sorted(set(names))
+
+    def run_test(self, name: str) -> dict[str, Any]:
+        """Запустить ровно один smoke-тест из белого списка (фоном)."""
+        test_name = str(name or "").strip()
+        if test_name not in self.list_tests():
+            return {"ok": False, "error": f"unknown test {test_name!r}"}
+        if not self._test_lock.acquire(blocking=False):
+            return {"ok": False, "error": "busy"}
+        self._test_running = test_name
+        try:
+            thread = threading.Thread(
+                target=self._run_test_worker,
+                args=(test_name,),
+                name=f"kivi-test-{test_name}",
+                daemon=True,
+            )
+            thread.start()
+        except Exception as exc:  # noqa: BLE001 - запуск не должен ронять API
+            self._test_running = None
+            self._test_lock.release()
+            logger.warning("тесты: {} не запущен: {}", test_name, exc)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        logger.info("тесты: запущен {} (pid потока {})", test_name, thread.ident)
+        return {"ok": True, "name": test_name, "started": True}
+
+    def _run_test_worker(self, name: str) -> None:
+        """Поток одного теста: поток строк -> test_line, итог -> test_done."""
+        started = time.monotonic()
+        code = -1
+        timed_out = False
+        process: subprocess.Popen[str] | None = None
+        timer: threading.Timer | None = None
+        try:
+            command = [sys.executable, f"tests/{name}.py"]
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            process = subprocess.Popen(
+                command,
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
+            )
+            self._test_process = process
+
+            def kill_on_timeout() -> None:
+                nonlocal timed_out
+                if process is not None and process.poll() is None:
+                    timed_out = True
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+            timer = threading.Timer(TEST_TIMEOUT_S, kill_on_timeout)
+            timer.daemon = True
+            timer.start()
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\r\n")
+                if line:
+                    self.broadcast({"event": "test_line", "name": name, "line": line})
+            code = int(process.wait() or 0)
+        except Exception as exc:  # noqa: BLE001 - тест не должен ронять API
+            logger.warning("тесты: {} упал при запуске: {}: {}", name, type(exc).__name__, exc)
+            self.broadcast(
+                {
+                    "event": "test_line",
+                    "name": name,
+                    "line": f"ERROR: {type(exc).__name__}: {exc}",
+                }
+            )
+            code = -1
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if process is not None:
+                try:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                except OSError:
+                    pass
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                except OSError:
+                    pass
+            self._test_process = None
+            duration = time.monotonic() - started
+            ok = code == 0 and not timed_out
+            self.broadcast(
+                {
+                    "event": "test_done",
+                    "name": name,
+                    "ok": bool(ok),
+                    "code": int(code),
+                    "duration_s": round(duration, 3),
+                }
+            )
+            logger.info(
+                "тесты: {} завершён: ok={}, code={}, {:.2f} c",
+                name,
+                ok,
+                code,
+                duration,
+            )
+            self._test_running = None
+            try:
+                self._test_lock.release()
+            except RuntimeError:
+                pass
+
     def close_gap(self, gap_id: int) -> dict[str, Any]:
         from kivi.skills.gaps import get_gap_log
 
@@ -684,6 +824,11 @@ class ApiServer:
             await self._reply(websocket, result)
         elif command == "test_skill":
             result = self.test_skill(str(message.get("name") or ""))
+            await self._reply(websocket, result)
+        elif command == "list_tests":
+            await self._reply(websocket, {"ok": True, "tests": self.list_tests()})
+        elif command == "run_test":
+            result = self.run_test(str(message.get("name") or ""))
             await self._reply(websocket, result)
         elif command == "close_gap":
             try:

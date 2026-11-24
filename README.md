@@ -71,17 +71,17 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched,routine,echo,chat_ui,manage_search}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine,echo,chat_ui,manage_search,test_runner}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
-## Текущий шаг (сдан, ждёт голосовой приёмки)
-Четыре фикса: `listen_control` (пауза/resume VAD, wake-детекция остаётся),
-`memory_manage` (очистка расписания/напоминаний и задачи только после confirm),
-`capabilities` (честный список реальных скиллов) и устойчивый поиск
-(DDGS-бэкенды api/html/lite, кэш `data/search_cache.json` на 600 с,
-отдельный ответ «Поиск временно недоступен…»). Планировщик знает новые фразы.
-Проверки: `python tests\smoke_manage_search.py` -> PASS; регрессии
-smoke_chat_ui, smoke_routine, smoke_echo, smoke_flow, smoke_dialogue, smoke_api,
-smoke_memory_deep, smoke_search.
+## Текущий шаг (сдан, ждёт приёмки)
+Запуск smoke-тестов из интерфейса: API `list_tests` / `run_test` с жёстким
+whitelist `tests/smoke_*.py`, события `test_line` и `test_done`, один тест
+одновременно (иначе `busy`), timeout 300 с. В «Настройках» блок «Тесты»:
+кнопка на каждый найденный файл, моноширинная консоль с автоскроллом,
+бейдж PASS/FAIL и кнопка «Прогнать все» (очередь по одному). Новые
+`tests/smoke_*.py` появляются автоматически, UI править не нужно.
+Проверки: `python tests\smoke_test_runner.py` -> PASS; регрессии
+smoke_chat_ui, smoke_api, smoke_manage_search.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить

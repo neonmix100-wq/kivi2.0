@@ -582,6 +582,92 @@ input {
 .font-verdana { font-family: Verdana, Geneva, sans-serif; }
 .font-georgia { font-family: Georgia, "Times New Roman", serif; }
 
+/* --- настройки: тесты --- */
+
+.tests-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.tests-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.tests-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.test-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-2);
+}
+
+.test-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.test-run {
+  flex: none;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.tests-console-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  min-height: 20px;
+  font-size: 12px;
+}
+
+.test-badge {
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.test-badge.pass {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
+  background: color-mix(in srgb, var(--ok) 12%, var(--card));
+}
+
+.test-badge.fail {
+  color: #ff6b6b;
+  border-color: color-mix(in srgb, #ff6b6b 55%, var(--border));
+  background: color-mix(in srgb, #ff6b6b 12%, var(--card));
+}
+
+.log-view.test-output {
+  height: min(34vh, 340px);
+  min-height: 180px;
+}
+
 /* --- логи и заглушки --- */
 
 .log-view {
