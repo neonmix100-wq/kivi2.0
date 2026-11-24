@@ -39,7 +39,7 @@ class ApiClient:
             while True:
                 raw = self._ws.recv(timeout=limit)
                 message = json.loads(raw)
-                if isinstance(message, dict) and "ok" in message:
+                if isinstance(message, dict) and "event" not in message and "ok" in message:
                     return message
                 if isinstance(message, dict):
                     self.events.append(message)
