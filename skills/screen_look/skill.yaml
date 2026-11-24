@@ -1,0 +1,30 @@
+name: screen_look
+version: "1.0.0"
+description: "Посмотреть на экран и коротко описать видимое"
+category: vision
+triggers:
+  - что на экране
+  - что я вижу
+  - посмотри на экран
+  - что открыто
+  - прочитай ошибку с экрана
+  - что за окно
+intents:
+  - описать экран
+  - прочитать ошибку с экрана
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network: []
+  filesystem: []
+  tools: [screenshot, vision]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""

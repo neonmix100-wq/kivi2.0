@@ -8,7 +8,8 @@ Kivi — локальный голосовой ассистент для Але�
 
 **Текущий статус:** голосовой тракт, wake-word «Киви», диалоговое окно, эхо-гейт,
 скиллы, память, напоминания, поиск, OpenCode, Chat UI, тест-раннер и Windows-сборка
-(NSIS installer + portable) уже работают. Тесты — smoke; часть работает без
+(NSIS installer + portable) уже работают. Зрение (скриншот экрана → vision-тир)
+добавлено. Тесты — smoke; часть работает без
 сети и платных вызовов, отдельные (`smoke_planner`, `smoke_search`,
 `smoke_router --live`, `smoke_opencode --live`) используют реальные сервисы.
 
@@ -58,6 +59,7 @@ Kivi — локальный голосовой ассистент для Але�
 | STT | `faster-whisper` + CTranslate2, CUDA `int8_float16` | Локальное распознавание русского; CPU fallback |
 | LLM | Polza, OpenAI-совместимый HTTP API | Тиры cheap/coder/vision/strong, стриминг ответа |
 | TTS | Polza `google/gemini-3.8-flash-tts`, голос `Leda` | Голосовой ответ; base64 MP3 → PCM 48 кГц |
+| Зрение | GDI `BitBlt` + Pillow → vision-тир | По запросу описать текущий экран |
 | Память | Markdown-vault + SQLite + эмбеддинги `baai/bge-m3` | Факты, расписание, задачи, темы, люди и история диалога |
 | Скиллы | Python-манифесты `skill.yaml` + брокер прав | Изолированные действия без `os`/`subprocess` у скилла |
 | Поиск | `duckduckgo-search`, бэкенды api/html/lite | Живые данные без API-ключа |
@@ -95,6 +97,7 @@ Kivi — локальный голосовой ассистент для Але�
 | `nvidia-cudnn-cu12` | `9.28.1.4` | CUDA cuDNN DLL для faster-whisper |
 | `duckduckgo-search` | `8.1.1` | Поиск DuckDuckGo без API-ключа |
 | `websockets` | `17.4` | WebSocket API `127.0.0.1:8765` и клиенты |
+| `Pillow` | `13.0.0` | Скриншот → PNG для vision-тира |
 
 `torch` в окружении не установлен; STT работает на faster-whisper/CTranslate2,
 VAD — на ONNX Runtime. CUDA-библиотеки подключаются через `nvidia-*` pip-пакеты,
@@ -204,6 +207,7 @@ fallback_local_and_warn`.
 | `kivi/api/pending.py` | ask/confirm с Event и таймаутом |
 | `kivi/api/client.py` | Синхронный WS-клиент для тестов/утилит |
 | `kivi/ui/overlay.py` | OverlayService: ask/confirm/info через API |
+| `kivi/vision/screen.py` | GDI BitBlt-захват, downscale PNG, debug `save_last` |
 | `kivi/lipsync/`, `kivi/safety/`, `kivi/speaker/` | Зарезервированные пакеты/точки расширения |
 
 
@@ -221,6 +225,7 @@ fallback_local_and_warn`.
 | `listen_control` | system | tool `listen`; safe | Пауза/возобновление VAD |
 | `memory_manage` | data | fs: `D:\Kivi\memory`; tools `fs_read`, `fs_write`, `reminders_write`, `confirm`; risk: confirm | Очистка и закрытие записей только после подтверждения |
 | `capabilities` | system | tool `skills_read`; safe | Честный список включённых умений |
+| `screen_look` | vision | tools `screenshot`, `vision`; safe | Скриншот экрана и короткое описание |
 
 `skills/installed/` — каталог устанавливаемых скиллов, в git не входит.
 
@@ -236,6 +241,7 @@ fallback_local_and_warn`.
 | `data/reminders.json` | Напоминания: `id`, ISO-время с датой, текст, `done` |
 | `data/search_cache.json` | Кэш DDGS: нормализованный запрос → `ts`, `results`, TTL 600 с |
 | `data/prefs.json` | Пользовательская громкость TTS (вне git) |
+| `data/tmp/last_screen.png` | Последний скриншот только при `vision.save_last: true` |
 | `memory/` | Markdown-vault: `profile.md`, `schedule.md`, `tasks.md`, `topics/`, `people/`, `journal/` |
 | `data/logs/kivi.log` | DEBUG/INFO лог ядра с ротацией 10 МБ |
 | `data/logs/wake.log` | Распознанные фразы и решения wake-цикла |
@@ -265,6 +271,7 @@ fallback_local_and_warn`.
 | `memory` | `enabled: true`, `vault_path: memory`, kinds profile/schedule/tasks/topics/people, reflect 20 реплик/10 мин/60 с/300 с, `retrieve_k: 4`, `embed_model: baai/bge-m3` | Долгая память |
 | `api` | `host: 127.0.0.1`, `port: 8765`, `ask_timeout_s: 60`, `confirm_timeout_s: 120`, `text_speaks: true` | WebSocket UI |
 | `budget` | `brain_monthly_rub: 3000`, `voice_monthly_rub: 800`, `on_exceed: fallback_local_and_warn` | Общий лимит |
+| `vision` | `max_side: 1280`, `save_last: false` | Скриншот и отладочный файл |
 | `persona`/`user` | имя Киви, wake_names `[киви]`, стиль, `address_as: Лёша`; `user.timezone` пока `УТОЧНИТЬ` | Персона и обращение |
 | `speaker` | `enabled: true`, `gate: tools_only`, `threshold: 0.65` | Гейт исполнителя (по ТЗ) |
 | `safety` | confirm: delete/overwrite_outside_workspace/terminal_outside_workspace/install/send_email/purchase/password; sandbox `D:\Kivi\workspace`; trash_only; git_checkpoint | Безопасность |
@@ -319,6 +326,7 @@ powershell -ExecutionPolicy Bypass -File scripts\kivi_status.ps1
 
 ```powershell
 python tests\smoke_<name>.py
+python tests\smoke_vision.py
 python tests\smoke_opencode.py --live
 python tests\smoke_router.py --live
 ```
@@ -396,6 +404,8 @@ timeout 300 с.
 - [x] **Поиск:** DDGS api/html/lite, reformulate, summary, кэш 600 с и отдельный
   ответ при отказе всех бэкендов.
 - [x] **OpenCode-код:** отдельная рабочая папка на задачу, mock/`--live` тесты.
+- [x] **Зрение:** `screen_look` делает скриншот только по команде, сжимает PNG
+  до `vision.max_side` и просит vision-тир описать экран.
 - [x] **Chat UI:** история, голосовые и текстовые turn'ы, общий `handle_command`,
   `send_text`, `turn`-события.
 - [x] **Оверлей и главное окно:** Electron, статус, громкость, логи, память,

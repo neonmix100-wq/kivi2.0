@@ -71,6 +71,44 @@ def _credentials() -> tuple[str, str]:
     return base.rstrip("/"), key
 
 
+def _copy_messages(messages: list[dict]) -> list[dict]:
+    """Скопировать messages, сохранив мультимодальный content-массив.
+
+    Для vision допускаются части ``{"type": "text", "text": ...}`` и
+    ``{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}``.
+    Содержимое изображения не логируется.
+    """
+    prepared: list[dict] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            raise ProviderError("сообщение должно быть объектом")
+        message = dict(item)
+        content = message.get("content")
+        if isinstance(content, list):
+            parts: list[dict] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise ProviderError("часть content должна быть объектом")
+                kind = str(part.get("type") or "")
+                if kind == "text":
+                    parts.append({"type": "text", "text": str(part.get("text") or "")})
+                elif kind == "image_url":
+                    image = part.get("image_url")
+                    url = image.get("url") if isinstance(image, dict) else ""
+                    if not isinstance(url, str) or not url.strip():
+                        raise ProviderError("image_url.url пуст")
+                    parts.append(
+                        {"type": "image_url", "image_url": {"url": url.strip()}}
+                    )
+                else:
+                    raise ProviderError(f"неизвестный тип content: {kind!r}")
+            if not parts:
+                raise ProviderError("пустой content-массив")
+            message["content"] = parts
+        prepared.append(message)
+    return prepared
+
+
 class PolzaProvider:
     """Облачный провайдер, OpenAI-совместимый /chat/completions."""
 
@@ -96,7 +134,8 @@ class PolzaProvider:
         """Один запрос к модели. Возвращает text/tokens/cost_rub/raw."""
         _, key = _credentials()
         url = f"{self.base_url}/chat/completions"
-        payload: dict = {"model": model, "messages": messages}
+        prepared = _copy_messages(messages)
+        payload: dict = {"model": model, "messages": prepared}
         if tools:
             payload["tools"] = tools
 
@@ -154,7 +193,7 @@ class PolzaProvider:
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": _copy_messages(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }

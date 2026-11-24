@@ -33,6 +33,7 @@ const ui = {
   windowBadge: $('#window-badge'),
   volumeSlider: $('#volume-slider'),
   volumeValue: $('#volume-value'),
+  screenLook: $('#btn-screen-look'),
   lastEvent: $('#last-event'),
   lastEventTime: $('#last-event-time'),
   logView: $('#log-view'),
@@ -1059,11 +1060,33 @@ function initVolume() {
   });
 }
 
+function initScreenLook() {
+  if (!ui.screenLook) return;
+  ui.screenLook.addEventListener('click', () => {
+    ui.screenLook.disabled = true;
+    showToast('Смотрю экран…');
+    request('send_text', { text: 'что на экране' }, 120000)
+      .then((reply) => {
+        if (!reply || reply.ok === false) {
+          showToast(reply && reply.error ? reply.error : 'не удалось посмотреть экран');
+          return;
+        }
+        showToast(reply.response || 'Экран обработан.');
+        noteEvent(`экран: ${reply.response || 'готово'}`);
+      })
+      .catch((error) => showToast(`экран: ${error.message || error}`))
+      .finally(() => {
+        ui.screenLook.disabled = false;
+      });
+  });
+}
+
 function init() {
   initSettings();
   initNav();
   initWindowControls();
   initVolume();
+  initScreenLook();
   initMemory();
   initSkills();
   initGaps();

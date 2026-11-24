@@ -73,6 +73,8 @@ route=skill, skill_name=remember, args: {kind: task, what}.
 skill_name=tasks_list.
 - Если «что ты умеешь/что ты можешь/твои возможности/список умений» — \
 route=skill, skill_name=capabilities.
+- Если «что на экране/что я вижу/посмотри на экран/что открыто/прочитай ошибку \
+с экрана/что за окно» — route=skill, skill_name=screen_look.
 - Если «выруби/выключи/поставь на паузу прослушку» или «не слушай» — \
 route=skill, skill_name=listen_control, args: {action: pause}.
 - Если «включи/возобнови прослушку/слушай снова» — route=skill, \

@@ -42,6 +42,7 @@ __all__ = [
     "project_timezone",
     "set_listen_callback",
     "set_overlay_service",
+    "set_vision_router",
 ]
 
 TZ_NAME = "Asia/Novosibirsk"
@@ -52,6 +53,7 @@ MAX_LIST_ENTRIES = 5000  # предохранитель от обхода огр
 _DB_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 _listen_callback: Callable[[bool], object] | None = None
 _overlay_service: Any | None = None
+_vision_router: Any | None = None
 
 
 def set_listen_callback(callback: Callable[[bool], object] | None) -> None:
@@ -64,6 +66,12 @@ def set_overlay_service(service: Any | None) -> None:
     """Подключить OverlayService для confirm-карточек."""
     global _overlay_service
     _overlay_service = service
+
+
+def set_vision_router(router: Any | None) -> None:
+    """Подключить Router ядра для skills/screen_look."""
+    global _vision_router
+    _vision_router = router
 
 
 def project_timezone() -> timezone | ZoneInfo:
@@ -376,6 +384,36 @@ class SkillContext:
         except Exception as exc:  # noqa: BLE001 - отсутствие UI не должно падать
             logger.warning("скилл {}: confirm недоступен: {}", self.name, exc)
             return False
+
+    def screenshot(self):
+        """Снять основной монитор. Нужен tool screenshot."""
+        self._require_tool("screenshot")
+        from kivi.vision.screen import capture_screen
+
+        return capture_screen()
+
+    def vision(self, image_png: bytes, prompt: str) -> dict[str, Any]:
+        """Отправить PNG в vision-тир Router. Нужен tool vision."""
+        self._require_tool("vision")
+        router = _vision_router
+        if router is None:
+            raise RuntimeError("vision Router недоступен")
+        import base64
+
+        data_url = "data:image/png;base64," + base64.b64encode(bytes(image_png)).decode(
+            "ascii"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": str(prompt)},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ]
+        result = router.complete(messages, task_type="vision")
+        return dict(result or {})
 
     def skills_list(self) -> list[dict[str, str]]:
         """Включённые скиллы для capabilities. Нужен tool skills_read."""

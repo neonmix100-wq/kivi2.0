@@ -235,9 +235,10 @@ class WakeLoop:
         self._turn_lock = threading.RLock()
         self.paused = False
         try:
-            from kivi.skills.broker import set_listen_callback
+            from kivi.skills.broker import set_listen_callback, set_vision_router
 
             set_listen_callback(self.set_listen)
+            set_vision_router(self.router)
         except Exception as exc:  # noqa: BLE001 - скилл прослушки не критичен для старта
             logger.warning("прослушка: callback не подключён: {}", exc)
 

@@ -122,6 +122,27 @@ class Router:
             prepared = [dict(item) for item in messages]
             if not all("role" in item and "content" in item for item in prepared):
                 raise ValueError("Router: каждое сообщение должно содержать role и content")
+            for item in prepared:
+                content = item.get("content")
+                if isinstance(content, list):
+                    if not content:
+                        raise ValueError("Router: пустой content-массив")
+                    for part in content:
+                        if not isinstance(part, dict):
+                            raise ValueError("Router: часть content должна быть объектом")
+                        kind = str(part.get("type") or "")
+                        if kind == "text":
+                            if not isinstance(part.get("text"), str):
+                                raise ValueError("Router: text-часть без строки text")
+                        elif kind == "image_url":
+                            image = part.get("image_url")
+                            url = image.get("url") if isinstance(image, dict) else None
+                            if not isinstance(url, str) or not url.strip():
+                                raise ValueError("Router: image_url.url пуст")
+                        else:
+                            raise ValueError(
+                                f"Router: неизвестный тип content {kind!r}"
+                            )
             return prepared
         raise ValueError("Router: ожидались строка, dict или непустой список сообщений")
 
