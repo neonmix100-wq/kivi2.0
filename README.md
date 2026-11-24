@@ -71,17 +71,15 @@ data/logs/kivi.log.
 ## Тесты
 smoke_{speak,audio,router,stt_local,wakeword,skills,planner,gap_closer,search,
 opencode,flow,dialogue,search_context,tts_stream,memory,memory_deep,api,
-volume_exit,reflect_sched,routine,echo,chat_ui,manage_search,test_runner}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
+volume_exit,reflect_sched,routine,echo,chat_ui,manage_search,test_runner,pack}; level_meter; cuda_check. Демо оверлея: tests/api_ask_demo.py.
 
 ## Текущий шаг (сдан, ждёт приёмки)
-Запуск smoke-тестов из интерфейса: API `list_tests` / `run_test` с жёстким
-whitelist `tests/smoke_*.py`, события `test_line` и `test_done`, один тест
-одновременно (иначе `busy`), timeout 300 с. В «Настройках» блок «Тесты»:
-кнопка на каждый найденный файл, моноширинная консоль с автоскроллом,
-бейдж PASS/FAIL и кнопка «Прогнать все» (очередь по одному). Новые
-`tests/smoke_*.py` появляются автоматически, UI править не нужно.
-Проверки: `python tests\smoke_test_runner.py` -> PASS; регрессии
-smoke_chat_ui, smoke_api, smoke_manage_search.
+Windows-упаковка UI: `electron-builder` собирает NSIS installer и portable exe.
+Ядро остаётся в `D:\Kivi` и запускается приложением; `kiviHome` берётся из
+`KIVI_HOME`, `%APPDATA%\kivi-desktop\kivi-home.json` или `D:\Kivi`.
+В packaged-режиме devtools закрыты, лог main — `userData/kivi-app.log`.
+Проверки: `python tests\smoke_pack.py` -> PASS; сборка `cd app; npm run dist`
+создаёт `Kivi Setup 0.1.0.exe` и `Kivi 0.1.0.exe`.
 
 ## Roadmap
 Вариант А (выбран): 1) оверлей-виджет — каркас Electron сдан, дальше наполнить
@@ -95,3 +93,4 @@ smoke_chat_ui, smoke_api, smoke_manage_search.
 OpenCode V1 не понимает V2-permissions — конфиг держать минимальным.
 OpenCode запускать только в data/opencode_jobs/<uuid>/ (он умеет bash).
 setx требует нового терминала. nanobind-leak soxr при выходе — косметика.
+- [ ] UI тесты: при запуске нового теста очищать консоль и показывать вывод только последнего запущенного теста.

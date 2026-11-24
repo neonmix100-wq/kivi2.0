@@ -1,11 +1,13 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Menu } = require('electron');
 const path = require('node:path');
+const fs = require('node:fs');
 const net = require('node:net');
 const { spawn, execFile } = require('node:child_process');
 
-const PROJECT_ROOT = path.resolve(__dirname, '..');
+const UI_ROOT = __dirname;
+const DEFAULT_KIVI_HOME = 'D:\\Kivi';
 const CORE_HOST = '127.0.0.1';
 const CORE_PORT = 8765;
 const OVERLAY_MARGIN = 16;
@@ -16,6 +18,52 @@ let mainWindow = null;
 let overlayWindow = null;
 let coreChild = null;
 let coreSpawned = false;
+let appLogPath = null;
+
+function writeAppLog(...args) {
+  const line = args
+    .map((value) => (typeof value === 'string' ? value : JSON.stringify(value)))
+    .join(' ');
+  console.log(line);
+  if (!appLogPath) return;
+  try {
+    fs.mkdirSync(path.dirname(appLogPath), { recursive: true });
+    fs.appendFileSync(appLogPath, `${new Date().toISOString()} ${line}\n`, 'utf8');
+  } catch (_) {
+    /* лог не должен ронять приложение */
+  }
+}
+
+function initAppLog() {
+  if (appLogPath) return;
+  appLogPath = path.join(app.getPath('userData'), 'kivi-app.log');
+  writeAppLog('Kivi app started', {
+    packaged: app.isPackaged,
+    version: app.getVersion(),
+    userData: app.getPath('userData'),
+  });
+}
+
+function readJsonKiviHome() {
+  const file = path.join(app.getPath('userData'), 'kivi-home.json');
+  if (!fs.existsSync(file)) return '';
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const value = typeof raw === 'string' ? raw : raw && raw.kiviHome;
+    return typeof value === 'string' ? value.trim() : '';
+  } catch (error) {
+    writeAppLog('kivi-home.json is invalid:', error.message);
+    return '';
+  }
+}
+
+function resolveKiviHome() {
+  const envHome = String(process.env.KIVI_HOME || '').trim();
+  if (envHome) return path.resolve(envHome);
+  const jsonHome = readJsonKiviHome();
+  if (jsonHome) return path.resolve(jsonHome);
+  return DEFAULT_KIVI_HOME;
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -48,30 +96,36 @@ function coreIsReachable(timeoutMs = 700) {
 }
 
 async function ensureCore() {
+  const kiviHome = resolveKiviHome();
+  writeAppLog('Kivi core home:', kiviHome);
   if (await coreIsReachable()) {
     coreSpawned = false;
-    console.log('Kivi core already running on', CORE_PORT, '- attaching');
+    writeAppLog(`Kivi core already running on ${CORE_PORT} - attaching`);
     return;
   }
-  const python = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe');
+  const python = path.join(kiviHome, '.venv', 'Scripts', 'python.exe');
+  if (!fs.existsSync(python)) {
+    writeAppLog('Kivi core python not found:', python);
+    return;
+  }
   coreChild = spawn(python, ['-m', 'kivi.main'], {
-    cwd: PROJECT_ROOT,
-    env: process.env,
+    cwd: kiviHome,
+    env: { ...process.env, KIVI_HOME: kiviHome },
     stdio: 'ignore',
     windowsHide: true,
   });
   coreSpawned = true;
   coreChild.on('error', (error) => {
-    console.error('Kivi core spawn error', error);
+    writeAppLog('Kivi core spawn error', error.message);
     coreChild = null;
     coreSpawned = false;
   });
   coreChild.on('exit', (code, signal) => {
-    console.log('Kivi core exited', code, signal);
+    writeAppLog('Kivi core exited', String(code), String(signal));
     coreChild = null;
     coreSpawned = false;
   });
-  console.log('Kivi core spawned pid=', coreChild.pid);
+  writeAppLog('Kivi core spawned pid=', coreChild.pid);
 }
 
 function stopCore() {
@@ -117,14 +171,38 @@ function createMainWindow() {
     backgroundColor: '#171b22',
     title: 'Kivi',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(UI_ROOT, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
     },
   });
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.loadFile(path.join(UI_ROOT, 'renderer', 'index.html')).then(
+    () => writeAppLog('Kivi main window loaded'),
+    (error) => writeAppLog('Kivi main window load error', error.message),
+  );
+  mainWindow.webContents.on('did-fail-load', (_event, code, description) => {
+    writeAppLog('Kivi main did-fail-load', String(code), String(description));
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    writeAppLog('Kivi main render-process-gone', JSON.stringify(details));
+  });
+  mainWindow.once('ready-to-show', () => {
+    writeAppLog('Kivi main ready-to-show');
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) {
+      writeAppLog('Kivi main force-show timeout');
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  }, 4000);
+  mainWindow.on('show', () => writeAppLog('Kivi main shown'));
   mainWindow.on('closed', () => {
     mainWindow = null;
     app.quit();
@@ -161,15 +239,16 @@ function createOverlayWindow() {
     show: false,
     backgroundColor: '#00000000',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(UI_ROOT, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
     },
   });
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.loadFile(path.join(__dirname, 'renderer', 'overlay.html'));
+  overlayWindow.loadFile(path.join(UI_ROOT, 'renderer', 'overlay.html'));
   overlayWindow.once('ready-to-show', () => {
     if (!overlayWindow) return;
     overlayWindow.showInactive();
@@ -208,12 +287,15 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
+  initAppLog();
+  if (app.isPackaged) Menu.setApplicationMenu(null);
   createMainWindow();
   createOverlayWindow();
-  ensureCore().catch((error) => console.error('core start failed', error));
+  ensureCore().catch((error) => writeAppLog('core start failed', error.message));
 });
 
 app.on('before-quit', () => {
+  writeAppLog('Kivi app quitting');
   stopCore();
 });
 

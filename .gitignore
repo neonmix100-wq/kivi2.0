@@ -8,3 +8,4 @@ node_modules/
 workspace/
 skills/installed/
 data/opencode_jobs/
+app/dist/
