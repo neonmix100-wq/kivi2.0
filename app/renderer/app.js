@@ -523,8 +523,8 @@ function beginTestOutput(name) {
 }
 
 function onTestLine(msg) {
-  if (!currentTest) startTestUI(msg.name);
-  if (msg.name !== currentTest) return;
+  if (!msg || !msg.name) return;
+  if (msg.name !== currentTest) startTestUI(msg.name);
   if (testOutputFor !== msg.name) startTestUI(msg.name);
   appendTestOutput(String(msg.line || ''));
 }
