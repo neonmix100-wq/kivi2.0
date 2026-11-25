@@ -39,6 +39,7 @@ from kivi.brain.persona import PERSONA_PROMPT, to_speech
 from kivi.brain.session import Session
 from kivi.config import LOG_DIR_PATH as LOG_DIR
 from kivi.config import Settings, get_settings
+from kivi.skills.loader import FALLBACK_MARKER as SKILL_FALLBACK
 from kivi.stt.local import transcribe_wav
 from kivi.tts import replies
 from kivi.tts.stream import SentenceSpeaker
@@ -665,6 +666,17 @@ class WakeLoop:
                         plan.get("args") or {},
                         speak=bool(speak),
                     )
+                    if response == SKILL_FALLBACK:
+                        # Скилл честно не нашёл цифру: ищем в интернете.
+                        route = "search"
+                        wake_log.info("маршрут skill->search: {!r}", text[:60])
+                        response = self._answer_search_collect(
+                            text,
+                            plan,
+                            started,
+                            speak=bool(speak),
+                            use_facts=False,
+                        )
                 elif route == "search":
                     response = self._answer_search_collect(
                         text, plan, started, speak=bool(speak)
@@ -862,6 +874,10 @@ class WakeLoop:
             )
             answer = f"Скилл «{manifest.name}» упал."
         text = " ".join(str(answer).split())
+        if text == SKILL_FALLBACK:
+            # Источник не дал данных (сеть/страница): уходим в поиск, не «не умею».
+            wake_log.warning("скилл {}: нет данных от источника — fallback в поиск", manifest.name)
+            return text
         if text and speak:
             self._say(text)
         return text
@@ -884,7 +900,7 @@ class WakeLoop:
                 return reply
         session = self._get_session()
         memory = self._memory_block(command)
-        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
+        system_text = self._system_prompt(memory)
         messages = (
             [{"role": "system", "content": system_text}]
             + session.history()
@@ -968,7 +984,7 @@ class WakeLoop:
         """Разговорный путь без записи в session; озвучка по флагу speak."""
         session = self._get_session()
         memory = self._memory_block(command)
-        system_text = PERSONA_PROMPT + (f"\n\n{memory}" if memory else "")
+        system_text = self._system_prompt(memory)
         messages = (
             [{"role": "system", "content": system_text}]
             + session.history()
@@ -1030,6 +1046,7 @@ class WakeLoop:
         started: float,
         *,
         speak: bool,
+        use_facts: bool = True,
     ) -> str:
         """Поиск без записи в session; озвучка по флагу speak."""
         from kivi.skills.search import NO_DATA_ANSWER, answer_search
@@ -1054,6 +1071,7 @@ class WakeLoop:
                 router=self.router,
                 max_results=max_results,
                 timeout=timeout_s,
+                use_facts=use_facts,
             )
             text = " ".join(str(text or "").split())
         except Exception as exc:  # noqa: BLE001 - поиск не должен ронять цикл
@@ -1338,6 +1356,26 @@ class WakeLoop:
         return self.session
 
     # --- долгая память ---
+
+    def _system_prompt(self, memory: str = "") -> str:
+        """Персона + манифест возможностей + память.
+
+        Манифест добавляется ВСЕГДА: без него модель выдумывает ограничения
+        («нет доступа к сети»), хотя поиск и открытые API включены.
+        """
+        parts = [PERSONA_PROMPT]
+        try:
+            from kivi.brain.selfmodel import build_manifest
+
+            manifest = build_manifest(self.skills)
+        except Exception as exc:  # noqa: BLE001 - манифест не должен ломать чат
+            wake_log.debug("манифест: не собран: {}", exc)
+            manifest = ""
+        if manifest:
+            parts.append(manifest)
+        if memory:
+            parts.append(memory)
+        return "\n\n".join(parts)
 
     def _memory_block(self, query: str) -> str:
         """Блок памяти для системного промпта (пусто, если vault пуст).

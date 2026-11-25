@@ -185,6 +185,7 @@ fallback_local_and_warn`.
 | `kivi/tts/replies.py` | Готовые реплики fast-path (привет/спасибо/smalltalk) |
 | `kivi/brain/router.py` | Маршрутизация задач, тиры, эскалация, стриминг |
 | `kivi/brain/fastpath.py` | Мгновенный маршрут тривиальных реплик без LLM |
+| `kivi/brain/selfmodel.py` | Манифест возможностей (правда о себе) для промптов |
 | `kivi/brain/providers.py` | Polza/OpenAI-совместимый HTTP-провайдер |
 | `kivi/brain/budget.py` | Учёт рублей в SQLite, лимит до запроса |
 | `kivi/brain/session.py` | История SQLite `messages`/`sessions`, `route`/`source` |
@@ -200,7 +201,8 @@ fallback_local_and_warn`.
 | `kivi/skills/llm_planner.py` | JSON-ответ планировщика и каталог умений |
 | `kivi/skills/gap_closer.py` | Попытка закрыть пробел в умениях |
 | `kivi/skills/gaps.py` | Таблица `capability_gaps` в `data/kivi.db` |
-| `kivi/skills/search.py` | DDGS-бэкенды, кэш, reformulate, summarize |
+| `kivi/skills/search.py` | DDGS-бэкенды, кэш, deep-read страниц, reformulate, summarize |
+| `kivi/skills/facts_intent.py` | Распознавание «курс валюты»/«погода» без LLM |
 | `kivi/skills/reminders.py` | `data/reminders.json` и фоновый scheduler |
 | `kivi/skills/recall.py` | Targeted recall расписания/задач из vault |
 | `kivi/wake/detector.py` | Поиск имени «Киви», fuzzy по Левенштейну |
@@ -226,7 +228,8 @@ fallback_local_and_warn`.
 | `tasks_list` | data | fs: `D:\Kivi\memory`; tools `fs_read`, `reminders_read`; safe | Список открытых задач |
 | `listen_control` | system | tool `listen`; safe | Пауза/возобновление VAD |
 | `memory_manage` | data | fs: `D:\Kivi\memory`; tools `fs_read`, `fs_write`, `reminders_write`, `confirm`; risk: confirm | Очистка и закрытие записей только после подтверждения |
-| `capabilities` | system | tool `skills_read`; safe | Честный список включённых умений |
+| `capabilities` | system | tool `skills_read`; safe | Список умений и ответы о доступе по манифесту |
+| `facts` | data | net: `open.er-api.com`, `api.open-meteo.com`, `geocoding-api.open-meteo.com`; tool `http_get`; safe | Курс валют и погода из открытых API без ключей |
 | `screen_look` | vision | tools `screenshot`, `vision`; safe | Скриншот экрана и короткое описание |
 
 `skills/installed/` — каталог устанавливаемых скиллов, в git не входит.
@@ -441,7 +444,19 @@ timeout 300 с.
 - Первый чанк TTS ≤ 60 символов; вводная звучит, только если LLM молчит
   дольше 2.5 с и ни одного чанка ещё нет в очереди.
 - Поиск: `reformulate_query(command, history)` → чистый запрос; retry при
-  `NOT_FOUND`; summary с историей; по сырой реплике не искать.
+  `NOT_FOUND` с ДРУГИМ запросом (совпал — retry пропускаем) и без кэша; summary
+  с историей; по сырой реплике не искать.
+- Deep-read: если в сниппетах нет ни одной цифры, читаем top-2 страницы
+  (`fetch_page`: UA, таймаут 6 с, без тегов, ≤4000 симв.) и отдаём их
+  суммаризатору в `<untrusted>`.
+- Факты из открытых API: скилл `facts` (курс — `open.er-api.com`, погода —
+  `open-meteo.com`) отвечает цифрой из источника без ключей; при сбое источника
+  возвращает маркер `FALLBACK_MARKER`, и ядро уходит в `search`, а не в «не умею».
+  Планировщик ведёт «курс/погода» в `facts` без LLM (`kivi/skills/facts_intent.py`).
+- Манифест себя: `kivi/brain/selfmodel.py` собирается из реестра и `config.yaml`
+  и вставляется в system-промпт чата и суммаризатора ВСЕГДА; мета-вопросы
+  («что тебе нужно», «есть ли доступ», «почему не можешь») уходят в
+  `capabilities` без LLM и отвечают по манифесту.
 - Диалог: окно = тишина `silence_s=8` после её ответа; конец по фразам
   «конец диалога/заверши диалог/отбой»; «спасибо» **не** закрывает; пока говорит
   сама — входящие фразы отбрасываются.

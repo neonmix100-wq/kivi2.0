@@ -188,7 +188,8 @@ def step_fallbacks(registry, gaps: GapLog) -> bool:
     scripted = ScriptedRouter(['{"skill_name": "weather_now", "args": {}}'])
     planner = Planner(registry, router=scripted, gaps=gaps)
     with LogCatcher() as logs:
-        plan = planner.plan("какая погода завтра в Новосибирске")
+        # Команда нарочно не курс и не погода: fast-правило facts её не перехватит.
+        plan = planner.plan("включи свет в гостиной")
     meta = last_call()
     name = plan["skill"].name if plan["skill"] is not None else None
     print(f"    ответ LLM: {scripted.replies[0][:80]!r} -> {name} (источник {plan['source']})")

@@ -26,7 +26,12 @@ from loguru import logger
 from kivi.skills.broker import PermissionDenied, SkillContext
 from kivi.skills.registry import SkillManifest, SkillRegistry, get_registry
 
-__all__ = ["SkillLoadError", "invoke", "load"]
+__all__ = ["FALLBACK_MARKER", "SkillLoadError", "invoke", "load"]
+
+# Скилл не смог добыть факт (сеть/источник) и просит ядро уйти в поиск.
+# Возвращается handler.py как строка, ядро (loop) видит маркер и переключает
+# маршрут на search вместо ответа «не умею».
+FALLBACK_MARKER = "__kivi_skill_fallback__"
 
 _HANDLERS: dict[tuple[str, str, float], Callable[..., Any]] = {}
 

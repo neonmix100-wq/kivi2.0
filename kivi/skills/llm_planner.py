@@ -73,6 +73,10 @@ route=skill, skill_name=remember, args: {kind: task, what}.
 skill_name=tasks_list.
 - Если «что ты умеешь/что ты можешь/твои возможности/список умений» — \
 route=skill, skill_name=capabilities.
+- Если спрашивают про доступ/разрешения/«что тебе нужно»/«почему не можешь» — \
+route=skill, skill_name=capabilities (отвечает по манифесту).
+- Если «курс валюты/сколько стоит доллар/евро/погода/температура/будет ли дождь» — \
+route=skill, skill_name=facts, args: {kind: currency|weather, base?, quote?, city?}.
 - Если «что на экране/что я вижу/посмотри на экран/что открыто/прочитай ошибку \
 с экрана/что за окно» — route=skill, skill_name=screen_look.
 - Если «выруби/выключи/поставь на паузу прослушку» или «не слушай» — \

@@ -26,6 +26,8 @@ from typing import Any
 
 from loguru import logger
 
+from kivi.brain.selfmodel import is_meta_question
+from kivi.skills.facts_intent import classify as classify_facts
 from kivi.skills.gaps import GapLog, get_gap_log
 from kivi.skills.llm_planner import (
     DEFAULT_CATALOG_TOKENS,
@@ -105,6 +107,37 @@ class Planner:
         self.router = router
         self.gaps = gaps if gaps is not None else get_gap_log()
 
+    def _fast_plan(self, command: str) -> dict[str, Any] | None:
+        """Правила без LLM: мета-вопрос -> capabilities, курс/погода -> facts."""
+        if is_meta_question(command):
+            manifest = self.registry.get("capabilities")
+            if manifest is not None and manifest.enabled:
+                logger.info("планировщик: мета-вопрос -> capabilities (без LLM)")
+                return {
+                    "skill": manifest,
+                    "args": {"command": command},
+                    "missing": [],
+                    "source": "fast",
+                    "route": "skill",
+                    "gap_id": None,
+                }
+        params = classify_facts(command)
+        if params is not None:
+            manifest = self.registry.get("facts")
+            if manifest is not None and manifest.enabled:
+                logger.info(
+                    "планировщик: {} -> facts (без LLM)", params.get("kind")
+                )
+                return {
+                    "skill": manifest,
+                    "args": {**params, "command": command},
+                    "missing": [],
+                    "source": "fast",
+                    "route": "skill",
+                    "gap_id": None,
+                }
+        return None
+
     def match(self, command: str) -> tuple[SkillManifest, dict[str, Any]] | None:
         """Топ-1 скилл, если оценка не ниже порога и он не отключён. Иначе None."""
         for manifest, score in self.registry.search(command):
@@ -133,6 +166,10 @@ class Planner:
                 "gap_id": None,
             }
 
+        fast = self._fast_plan(text)
+        if fast is not None:
+            return fast
+
         missing: list[dict[str, str]] = []
         attempted: str | None = None
 
@@ -149,7 +186,7 @@ class Planner:
                 manifest = self.registry.get(skill_name)
                 if manifest is not None and manifest.enabled:
                     plan_args = dict(args or {})
-                    if manifest.name == "recall":
+                    if manifest.name in ("recall", "capabilities"):
                         plan_args.setdefault("command", text)
                     return {
                         "skill": manifest,
@@ -196,7 +233,7 @@ class Planner:
         if found is not None:
             manifest, args = found
             plan_args = dict(args or {})
-            if manifest.name == "recall":
+            if manifest.name in ("recall", "capabilities"):
                 plan_args.setdefault("command", text)
             return {
                 "skill": manifest,

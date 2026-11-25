@@ -1,10 +1,13 @@
-"""Скилл capabilities: честный список включённых умений из реестра."""
+"""Скилл capabilities: честный список умений и ответы о себе по манифесту."""
 from __future__ import annotations
+
+from typing import Any
 
 _LABELS = {
     "time_date": "время и дата",
     "file_search": "поиск файлов",
     "search": "поиск в интернете",
+    "facts": "курс валют и погода по открытым API",
     "code": "код через OpenCode",
     "recall": "память и расписание",
     "remember": "память и расписание",
@@ -14,11 +17,13 @@ _LABELS = {
     "listen_control": "управление прослушкой",
     "memory_manage": "управление памятью",
     "capabilities": "возможности",
+    "screen_look": "зрение (скриншот экрана)",
 }
 _ORDER = {
     "time_date": 10,
     "file_search": 20,
     "search": 25,
+    "facts": 27,
     "code": 65,
     "recall": 30,
     "remember": 30,
@@ -27,6 +32,7 @@ _ORDER = {
     "assistant_volume": 60,
     "listen_control": 70,
     "memory_manage": 80,
+    "screen_look": 75,
     "capabilities": 90,
 }
 
@@ -47,7 +53,18 @@ def _fallback_skills() -> list[dict[str, str]]:
         return []
 
 
-def handle(ctx, **_args) -> str:
+def handle(ctx, **args: Any) -> str:
+    command = " ".join(str(args.get("command") or args.get("question") or "").split())
+    if command:
+        # Мета-вопрос («что тебе нужно», «есть ли доступ») — отвечаем по манифесту,
+        # а не списком умений: пользователю нужен факт о доступе.
+        try:
+            from kivi.brain.selfmodel import is_meta_question, meta_answer
+
+            if is_meta_question(command):
+                return meta_answer()
+        except Exception:  # noqa: BLE001 - манифест не должен ломать скилл
+            pass
     getter = getattr(ctx, "skills_list", None)
     try:
         skills = getter() if callable(getter) else _fallback_skills()

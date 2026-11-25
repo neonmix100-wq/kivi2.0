@@ -1,0 +1,36 @@
+name: facts
+version: "1.0.0"
+description: "Курс валют и погода из открытых API без ключей"
+category: data
+triggers:
+  - курс доллара
+  - курс евро
+  - курс валют
+  - сколько стоит доллар
+  - сколько стоит евро
+  - погода
+  - температура на улице
+  - будет ли дождь
+intents:
+  - узнать курс валюты
+  - узнать погоду
+  - узнать температуру
+requires:
+  python: ">=3.12"
+  binaries: []
+  env: []
+  hardware: []
+permissions:
+  network:
+    - open.er-api.com
+    - api.open-meteo.com
+    - geocoding-api.open-meteo.com
+  filesystem: []
+  tools: [http_get]
+  risk: safe
+entry: "handler.py:handle"
+enabled: true
+source:
+  kind: builtin
+  repo: ""
+  commit: ""
