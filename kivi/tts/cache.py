@@ -28,14 +28,20 @@ from kivi.tts.speak import (
 
 __all__ = [
     "CACHE_DIR",
+    "SKILLS_CACHE_DIR",
     "cache_key",
     "cache_path",
     "play_mp3",
+    "skill_cache_key",
+    "skill_cache_path",
     "speak_cached",
+    "speak_skill_cached",
     "synthesize_cached",
+    "synthesize_skill_cached",
 ]
 
 CACHE_DIR = DATA_DIR / "tts_cache"
+SKILLS_CACHE_DIR = CACHE_DIR / "skills"  # детерминированные ответы скиллов (без лимита длины)
 MAX_CACHE_CHARS = 80  # длинные уникальные ответы не кэшируем — они засоряют диск
 SERVICE_PHRASES: tuple[str, ...] = ("Слушаю", "Готово", "Не расслышала, повтори")
 
@@ -82,6 +88,62 @@ def synthesize_cached(
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(mp3_path, target)
     logger.info("TTS cache: сохранено {} ({:.1f} КБ)", target.name, target.stat().st_size / 1024)
+    return target
+
+
+def skill_cache_key(text: str) -> str:
+    """sha256 только от текста: ответы скиллов детерминированы."""
+    normalized = " ".join(str(text).split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def skill_cache_path(text: str) -> Path:
+    return SKILLS_CACHE_DIR / f"{skill_cache_key(text)}.mp3"
+
+
+def synthesize_skill_cached(
+    text: str, *, model: str | None = None, voice: str | None = None
+) -> Path:
+    """Синтез ответа скилла с кэшем БЕЗ ограничения длины (data/tts_cache/skills)."""
+    phrase = " ".join(str(text).split())
+    if not phrase:
+        raise SpeakError("Пустой текст для озвучки")
+    model_id, voice_id = _tts_settings(model, voice)
+    target = skill_cache_path(phrase)
+    if target.exists() and target.stat().st_size > 0:
+        logger.debug("TTS cache(skill): попадание {!r}", phrase[:60])
+        return target
+    logger.info(
+        "TTS cache(skill): синтезирую {} симв. (один раз, дальше бесплатно)",
+        len(phrase),
+    )
+    mp3_path = synthesize_mp3(phrase, model=model_id, voice=voice_id)
+    SKILLS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(mp3_path, target)
+    logger.info(
+        "TTS cache(skill): сохранено {} ({:.1f} КБ)",
+        target.name,
+        target.stat().st_size / 1024,
+    )
+    return target
+
+
+def speak_skill_cached(
+    text: str, *, model: str | None = None, voice: str | None = None
+) -> Path:
+    """Сказать ответ скилла: из кэша (sha256 текста) или синтез один раз."""
+    phrase = " ".join(str(text).split())
+    if not phrase:
+        raise SpeakError("Пустой текст для озвучки")
+    model_id, voice_id = _tts_settings(model, voice)
+    target = skill_cache_path(phrase)
+    with speech_slot(phrase) as (run_id, state):
+        if target.exists() and target.stat().st_size > 0:
+            logger.debug("TTS cache(skill): играю из кэша {!r}", phrase[:60])
+        else:
+            target = synthesize_skill_cached(phrase, model=model_id, voice=voice_id)
+        state["duration"] = play_file(target, run_id=run_id)
+    logger.info("TTS cache(skill): сказано {!r}", phrase[:60])
     return target
 
 

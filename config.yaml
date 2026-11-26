@@ -72,6 +72,8 @@ brain:
   routing:
     chat: coder                  # «думающая» модель: gemini-4-hydrogen
     intent: coder                # планировщик тоже coder, не flash
+    compose: cheap               # композиция facts/weather — дешёвый тир
+    summarize: cheap             # сводка поиска — дешёвый тир
     memory: cheap
     code: opencode_cli
     vision: vision
@@ -83,6 +85,7 @@ brain:
   budget:
     monthly_rub: 3000
     warn_at: 0.8
+    per_turn_warn_rub: 0.5     # WARNING, если один turn дороже
     timezone: "Asia/Novosibirsk"
   prices:                       # руб за 1000 токенов, если в ответе нет usage.cost_rub
     default: {in: 0.0, out: 0.0}
@@ -94,7 +97,7 @@ vision:
 
 planner:
   strategy: llm_with_fallback    # llm_with_fallback | llm_only | fuzzy_only
-  catalog_max_tokens: 600        # бюджет каталога умений в промпте планировщика
+  catalog_max_tokens: 400        # компактный каталог: name + 3 triggers
   fallback_on_parse_error: true  # битый JSON/чужое имя скилла -> старый difflib
 
 gap_closer:
@@ -115,7 +118,7 @@ api:
   port: 8765
   ask_timeout_s: 60
   confirm_timeout_s: 120
-  text_speaks: true
+  text_speaks: false        # дефолт: текстовые ответы без озвучки (prefs может перекрыть)
 
 conversation:
   enabled: true

@@ -17,6 +17,7 @@ import json
 from typing import Any
 
 from kivi.brain.persona import to_speech
+from kivi.brain.router import complete_safe
 from kivi.log import logger
 
 __all__ = ["COMPOSE_PROMPT", "compose_answer", "deterministic_answer", "parse_payload"]
@@ -164,7 +165,9 @@ def compose_answer(
         {"role": "user", "content": str(command or "")},
     ]
     try:
-        result = router.complete(messages, task_type="chat")
+        result = complete_safe(
+            router, messages, task_type="compose", max_tokens=120
+        )
     except Exception as exc:  # noqa: BLE001 - сеть/бюджет: остаёмся с фактами
         logger.warning("facts: композиция не удалась: {}: {}", type(exc).__name__, exc)
         return fallback, 0.0

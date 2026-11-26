@@ -44,6 +44,8 @@ const ui = {
   chatForm: $('#chat-form'),
   chatInput: $('#chat-input'),
   chatState: $('#chat-state'),
+  chatTextSpeaks: $('#chat-text-speaks'),
+  settingsTextSpeaks: $('#settings-text-speaks'),
   testsList: $('#tests-list'),
   testsState: $('#tests-state'),
   testsCaption: $('#tests-title'),
@@ -146,6 +148,14 @@ function updateStatus(status) {
     ui.volumeSlider.value = String(percent);
     updateVolumeLabel(percent);
   }
+  if (status.text_speaks !== undefined) {
+    setTextSpeaksControls(Boolean(status.text_speaks));
+  }
+}
+
+function setTextSpeaksControls(value) {
+  if (ui.chatTextSpeaks) ui.chatTextSpeaks.checked = Boolean(value);
+  if (ui.settingsTextSpeaks) ui.settingsTextSpeaks.checked = Boolean(value);
 }
 
 function handleMessage(message) {
@@ -988,6 +998,25 @@ function initVolume() {
   });
 }
 
+function initTextSpeaks() {
+  const boxes = [ui.chatTextSpeaks, ui.settingsTextSpeaks].filter(Boolean);
+  if (!boxes.length) return;
+  boxes.forEach((box) => {
+    box.addEventListener('change', () => {
+      const value = Boolean(box.checked);
+      setTextSpeaksControls(value);
+      request('set_text_speaks', { v: value })
+        .then((reply) => {
+          if (reply && reply.text_speaks !== undefined) {
+            setTextSpeaksControls(Boolean(reply.text_speaks));
+            noteEvent(`озвучка текста: ${reply.text_speaks ? 'вкл' : 'выкл'}`);
+          }
+        })
+        .catch(() => showToast('не удалось переключить озвучку текста'));
+    });
+  });
+}
+
 function initScreenLook() {
   if (!ui.screenLook) return;
   ui.screenLook.addEventListener('click', () => {
@@ -1013,6 +1042,7 @@ function init() {
   initNav();
   initWindowControls();
   initVolume();
+  initTextSpeaks();
   initScreenLook();
   initMemory();
   initSkills();

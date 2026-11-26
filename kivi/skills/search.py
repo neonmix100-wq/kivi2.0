@@ -33,6 +33,7 @@ import yaml
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from kivi.brain.router import complete_safe
 from kivi.config import CONFIG_PATH, DATA_DIR
 from kivi.skills.registry import normalize_text
 
@@ -549,7 +550,7 @@ def summarize_with_llm(
     history: list[dict[str, Any]] | None = None,
     *,
     router: Any | None = None,
-    task_type: str = "chat",
+    task_type: str = "summarize",
 ) -> str:
     """Короткая сводка по результатам. Нет данных -> NOT_FOUND.
 
@@ -580,7 +581,9 @@ def summarize_with_llm(
     ]
     try:
         active_router = router if router is not None else _default_router()
-        result = active_router.complete(messages, task_type=task_type)
+        result = complete_safe(
+            active_router, messages, task_type=task_type, max_tokens=200
+        )
     except Exception as exc:  # noqa: BLE001 - сеть/бюджет/провайдер
         logger.warning("поиск: LLM не ответила: {}: {}", type(exc).__name__, exc)
         return NOT_FOUND
@@ -683,7 +686,7 @@ def answer_search(
     max_results: int | None = None,
     timeout: float | None = None,
     use_facts: bool = True,
-    summary_task_type: str = "chat",
+    summary_task_type: str = "summarize",
 ) -> str:
     """Ответ из интернета: переформулировка -> поиск -> сводка, при NOT_FOUND вторая попытка.
 

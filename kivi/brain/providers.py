@@ -130,6 +130,8 @@ class PolzaProvider:
         model: str,
         tools: list[dict] | None = None,
         timeout: float | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> dict:
         """Один запрос к модели. Возвращает text/tokens/cost_rub/raw."""
         _, key = _credentials()
@@ -138,6 +140,8 @@ class PolzaProvider:
         payload: dict = {"model": model, "messages": prepared}
         if tools:
             payload["tools"] = tools
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
 
         logger.debug("Polza: model={}, сообщений={}", model, len(messages))
         try:
@@ -187,6 +191,7 @@ class PolzaProvider:
         model: str,
         *,
         timeout: float | None = None,
+        max_tokens: int | None = None,
     ) -> Iterator[str]:
         """SSE-стрим ответа: yield дельт текста, в конце return StreamUsage."""
         _, key = _credentials()
@@ -197,6 +202,8 @@ class PolzaProvider:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
         logger.debug("Polza stream: model={}, сообщений={}", model, len(messages))
 
         collected: list[str] = []

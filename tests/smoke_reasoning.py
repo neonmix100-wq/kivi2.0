@@ -256,7 +256,7 @@ def main() -> int:
         ok &= check(
             "ответ сформулирован моделью по данным",
             any(
-                call["task_type"] == "chat"
+                call["task_type"] == "compose"
                 and "используя ТОЛЬКО данные" in call["system"]
                 and '"coin": "bitcoin"' in call["system"]
                 for call in router.calls

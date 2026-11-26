@@ -1,6 +1,6 @@
 """Каскадный роутер LLM: тиры, эскалация по провалам, учёт бюджета.
 
-task_type: chat | intent | memory | code | vision
+task_type: chat | intent | compose | summarize | memory | code | vision
 Маршрут берётся из brain.routing, модели — из brain.tiers, лимиты эскалации —
 из brain.escalation, деньги — в Budget (data/kivi.db).
 
@@ -24,9 +24,9 @@ from kivi.brain.providers import (
 from kivi.config import Settings, get_settings
 from kivi.log import logger
 
-__all__ = ["Router", "RouterError", "TASK_TYPES"]
+__all__ = ["Router", "RouterError", "TASK_TYPES", "complete_safe", "stream_safe"]
 
-TASK_TYPES = ("chat", "intent", "memory", "code", "vision")
+TASK_TYPES = ("chat", "intent", "compose", "summarize", "memory", "code", "vision")
 
 DEFAULT_TIERS = {
     "cheap": "deepseek/deepseek-v4.1-flash-1017",
@@ -37,6 +37,8 @@ DEFAULT_TIERS = {
 DEFAULT_ROUTING = {
     "chat": "cheap",
     "intent": "cheap",
+    "compose": "cheap",
+    "summarize": "cheap",
     "memory": "cheap",
     "code": "opencode_cli",
     "vision": "vision",
@@ -49,6 +51,40 @@ DEFAULT_ESCALATION = {
 }
 
 Verify = Callable[[str], bool]
+
+
+def complete_safe(
+    router: Any,
+    messages: Any,
+    *,
+    task_type: str = "chat",
+    max_tokens: int | None = None,
+) -> dict:
+    """router.complete с max_tokens; старые/мок-роутеры вызываются без него."""
+    try:
+        return router.complete(messages, task_type=task_type, max_tokens=max_tokens)
+    except TypeError as exc:
+        if "max_tokens" not in str(exc):
+            raise
+        return router.complete(messages, task_type=task_type)
+
+
+def stream_safe(
+    router: Any,
+    messages: Any,
+    *,
+    task_type: str = "chat",
+    max_tokens: int | None = None,
+):
+    """router.complete_stream с max_tokens; без поддержки — обычный вызов."""
+    try:
+        return router.complete_stream(
+            messages, task_type=task_type, max_tokens=max_tokens
+        )
+    except TypeError as exc:
+        if "max_tokens" not in str(exc):
+            raise
+        return router.complete_stream(messages, task_type=task_type)
 
 
 class RouterError(RuntimeError):
@@ -156,8 +192,12 @@ class Router:
         *,
         workdir: str | Path | None = None,
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
-        """Выполнить запрос по правилам роутера. Возвращает dict с текстом и метаданными."""
+        """Выполнить запрос по правилам роутера. Возвращает dict с текстом и метаданными.
+
+        max_tokens ограничивает OUT-токены (None — как решит провайдер).
+        """
         task = str(task_type).strip().lower()
         if task not in TASK_TYPES:
             raise ValueError(
@@ -165,22 +205,28 @@ class Router:
             )
         prepared = self._prepare(messages)
         route = str(self.routing.get(task, "cheap"))
-        logger.info("Router: task={} -> маршрут {}", task, route)
+        logger.info(
+            "Router: task={} -> маршрут {} (max_tokens={})", task, route, max_tokens
+        )
 
         if task == "intent":
             # Оркестратор всегда на Polza cheap, без эскалации вниз.
-            return self._call_orchestrator(prepared, verify)
+            return self._call_orchestrator(prepared, verify, max_tokens=max_tokens)
 
         if task == "code" or route == "opencode_cli":
             return self._run_code(prepared, task, verify, workdir, tools)
 
         start_tier = route if route in self.tiers else "cheap"
-        return self._escalate(prepared, start_tier, task, verify, tools)
+        return self._escalate(
+            prepared, start_tier, task, verify, tools, max_tokens=max_tokens
+        )
 
     def complete_stream(
         self,
         messages: str | list[dict] | dict,
         task_type: str = "chat",
+        *,
+        max_tokens: int | None = None,
     ):
         """Стрим ответа текстом. Бюджет пишется один раз в конце, эскалации нет."""
         task = str(task_type).strip().lower()
@@ -201,7 +247,7 @@ class Router:
         stream_usage = None
         collected: list[str] = []
         try:
-            generator = self.provider.stream(prepared, model)
+            generator = self.provider.stream(prepared, model, max_tokens=max_tokens)
             while True:
                 try:
                     piece = next(generator)
@@ -268,12 +314,18 @@ class Router:
         )
         return annotated
 
-    def _call_orchestrator(self, messages: list[dict], verify: Verify | None) -> dict:
+    def _call_orchestrator(
+        self,
+        messages: list[dict],
+        verify: Verify | None,
+        *,
+        max_tokens: int | None = None,
+    ) -> dict:
         """Оркестратор (intent): одна попытка на brain.orchestrator, без эскалации."""
         self._ensure_budget()
         model = self.orchestrator_model
         try:
-            result = self.provider.complete(messages, model)
+            result = self.provider.complete(messages, model, max_tokens=max_tokens)
         except (ProviderUnavailable, ProviderError) as exc:
             self.budget.record(
                 provider=self.provider.name,
@@ -346,6 +398,7 @@ class Router:
         *,
         attempt_offset: int = 0,
         entry_reason: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """Пройти лестницу тиров, пока какая-то попытка не пройдёт проверку."""
         chain = self._chain(start_tier)
@@ -362,7 +415,9 @@ class Router:
                 self._ensure_budget()
                 attempts_total += 1
                 try:
-                    result = self.provider.complete(messages, model, tools=tools)
+                    result = self.provider.complete(
+                        messages, model, tools=tools, max_tokens=max_tokens
+                    )
                 except (ProviderUnavailable, ProviderError) as exc:
                     last_error = exc
                     self.budget.record(

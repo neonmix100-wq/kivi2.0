@@ -266,7 +266,7 @@ fallback_local_and_warn`.
 | `audio` | `hostapi: Windows WASAPI`; input `Микрофон (fifine SC3)`; output `Наушники (2- Temple Pro Purple)`; capture 48000; target 16000; playback 48000; `soxr`; mono; block 32 мс; `aec: false` | Звук, устройства и ресемплинг |
 | `audio.echo` | `enabled: true`, `corr_threshold: 0.6`, `tail_ms: 600`, `max_delay_ms: 400` | Эхо-гейт |
 | `stt` | `primary: local`, `fallback: polza`, `model: large-v3-turbo`, `compute_type: int8_float16`, `language: ru`, `beam_size: 1` | Распознавание |
-| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing (`chat`/`intent` → **coder**, `memory` → cheap), escalation 3→2→strong, `budget.monthly_rub: 3000`, `warn_at: 0.8`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
+| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing (`chat`/`intent` → **coder**, `compose`/`summarize`/`memory` → cheap), escalation 3→2→strong, `budget.monthly_rub: 3000`, `warn_at: 0.8`, `per_turn_warn_rub: 0.5`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
 | `brain.local` | `model: qwen3-14b-instruct-q4_k_m`, `ctx: 8192`, `gpu_layers: all` | Резервный локальный профиль |
 | `tts` | `primary: polza_gemini`, `google/gemini-3.8-flash-tts`, `voice: Leda`, `streaming: true`, `base64_response: true`, `audio_format: mp3` | Голос; голос менять нельзя |
 | `skills` | `dir: skills`, `installed_dir: skills/installed`, auto-disable 3, timeout 30 с; browser/vision/music/telegram/home/rag | Реестр и политика скиллов |
@@ -275,7 +275,7 @@ fallback_local_and_warn`.
 | `search` | `enabled: true`, `max_results: 3`, `timeout_s: 15`, `fact_keywords` (кто/что/когда/…) | DuckDuckGo |
 | `conversation` | `enabled: true`, `silence_s: 8`, `end_phrases` (конец диалога/заверши диалог/отбой), `greeting_phrases` | Окно диалога |
 | `memory` | `enabled: true`, `vault_path: memory`, kinds profile/schedule/tasks/topics/people, reflect 20 реплик/10 мин/60 с/300 с, `retrieve_k: 4`, `embed_model: baai/bge-m3` | Долгая память |
-| `api` | `host: 127.0.0.1`, `port: 8765`, `ask_timeout_s: 60`, `confirm_timeout_s: 120`, `text_speaks: true` | WebSocket UI |
+| `api` | `host: 127.0.0.1`, `port: 8765`, `ask_timeout_s: 60`, `confirm_timeout_s: 120`, `text_speaks: false` (prefs перекрывает) | WebSocket UI |
 | `budget` | `brain_monthly_rub: 3000`, `voice_monthly_rub: 800`, `on_exceed: fallback_local_and_warn` | Общий лимит |
 | `vision` | `max_side: 1280`, `save_last: false` | Скриншот и отладочный файл |
 | `persona`/`user` | имя Киви, wake_names `[киви]`, стиль, `address_as: Лёша`; `user.timezone` пока `УТОЧНИТЬ` | Персона и обращение |
@@ -444,6 +444,18 @@ timeout 300 с.
   «память: пропуск по бюджету» в `wake.log`.
 - Первый чанк TTS ≤ 60 символов; вводная звучит, только если LLM молчит
   дольше 2.5 с и ни одного чанка ещё нет в очереди.
+- Озвучка по источнику: `source=text` молчит по умолчанию (`api.text_speaks: false`,
+  перекрывается `text_speaks` в `data/prefs.json`; тумблер «Озвучивать текстовые
+  ответы» в Чате и Настройках шлёт `set_text_speaks`), `source=voice` озвучивается
+  ВСЕГДА; напоминания и вводные — без изменений.
+- Лимиты OUT-токенов: planner 200 (при обрезке JSON — один повтор без лимита),
+  chat 400, compose 120, summarize 200. Компактный промпт планировщика:
+  каталог `name + 3 triggers`, манифест ~120 токенов, история — последняя пара
+  реплик, IN < 800 токенов.
+- Кэш TTS для ответов скиллов: `data/tts_cache/skills/<sha256(text)>.mp3` без
+  ограничения длины (детерминированные ответы), стриминговый чат не кэшируется.
+- Стоимость: turn-лог пишет `cost=…₽` и `cost_breakdown={planner, compose, chat,
+  tts, vision, search}`; если turn дороже `brain.budget.per_turn_warn_rub` — WARNING.
 - Поиск: `reformulate_query(command, history)` → чистый запрос; retry при
   `NOT_FOUND` с ДРУГИМ запросом (совпал — retry пропускаем) и без кэша; summary
   с историей; по сырой реплике не искать.

@@ -38,7 +38,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kivi.api.pending import PendingRegistry
 from kivi.config import CONFIG_PATH, PROJECT_ROOT
-from kivi.prefs import get_tts_volume, set_tts_volume
+from kivi.prefs import (
+    get_text_speaks,
+    get_tts_volume,
+    set_text_speaks,
+    set_tts_volume,
+)
 
 try:  # websockets >= 13
     from websockets.asyncio.server import serve
@@ -365,6 +370,12 @@ class ApiServer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def set_text_speaks(self, value: Any) -> bool:
+        """Тумблер «Озвучивать текстовые ответы»: prefs + статус для UI."""
+        flag = set_text_speaks(value)
+        self.text_speaks = bool(flag)
+        return bool(flag)
+
     def status(self) -> dict[str, Any]:
         """Снимок состояния ядра для события/команды status."""
         core = self._core
@@ -386,6 +397,7 @@ class ApiServer:
             "budget_used": float(data.get("budget_used") or 0.0),
             "volume": float(data.get("volume", get_tts_volume())),
             "window_open": bool(data.get("window_open")),
+            "text_speaks": bool(get_text_speaks()),
         }
 
     def broadcast_status(self, **fields: Any) -> bool:
@@ -714,14 +726,11 @@ class ApiServer:
         if not callable(handler):
             return {"ok": False, "error": "core handle_command unavailable"}
         try:
-            response, route = handler(
-                phrase,
-                source="text",
-                speak=bool(self.text_speaks),
-            )
-        except TypeError:
-            # Совместимость с ядром без необязательного speak.
+            # speak не передаём: ядро само решает по prefs/config (text_speaks).
             response, route = handler(phrase, source="text")
+        except TypeError:
+            # Совместимость с ядром без source=.
+            response, route = handler(phrase)
         except Exception as exc:  # noqa: BLE001 - ошибка должна вернуться клиенту
             logger.warning("api: send_text упал: {}: {}", type(exc).__name__, exc)
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -852,6 +861,10 @@ class ApiServer:
             volume = set_tts_volume(message.get("v"))
             self.broadcast_status(volume=volume)
             await self._reply(websocket, {"ok": True, "volume": volume})
+        elif command == "set_text_speaks":
+            flag = self.set_text_speaks(message.get("v"))
+            self.broadcast_status(text_speaks=flag)
+            await self._reply(websocket, {"ok": True, "text_speaks": flag})
         elif command == "get_gaps":
             try:
                 limit = int(message.get("limit") or 10)

@@ -126,7 +126,12 @@ def step_catalog(registry) -> bool:
     tokens_est = max(1, len(catalog) // 3)
     ok = True
     ok &= check("каталог содержит time_date", "- time_date:" in catalog)
-    ok &= check("у каждой строки есть triggers", "triggers:" in catalog)
+    catalog_lines = [line for line in catalog.splitlines() if line.startswith("- ")]
+    ok &= check(
+        "каталог: имя + triggers без описаний",
+        bool(catalog_lines) and all(": " in line for line in catalog_lines),
+        str(catalog_lines[:3]),
+    )
     ok &= check(
         "каталог в бюджете ~600 токенов",
         tokens_est <= 660,

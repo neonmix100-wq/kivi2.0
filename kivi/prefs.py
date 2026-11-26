@@ -19,15 +19,19 @@ __all__ = [
     "DEFAULT_PREFS",
     "DEFAULT_TTS_VOLUME",
     "PREFS_PATH",
+    "TEXT_SPEAKS_KEY",
     "clamp_volume",
+    "get_text_speaks",
     "get_tts_volume",
     "load_prefs",
     "reload_prefs",
+    "set_text_speaks",
     "set_tts_volume",
 ]
 
 PREFS_PATH = DATA_DIR / "prefs.json"
 DEFAULT_TTS_VOLUME = 0.8
+TEXT_SPEAKS_KEY = "text_speaks"
 DEFAULT_PREFS: dict[str, Any] = {"tts_volume": DEFAULT_TTS_VOLUME}
 
 _LOCK = threading.RLock()
@@ -96,6 +100,46 @@ def set_tts_volume(value: Any) -> float:
         _loaded_mtime = _mtime()
     logger.info("настройки: tts_volume = {:.2f}", volume)
     return volume
+
+
+def config_text_speaks_default() -> bool:
+    """Дефолт из config.yaml: api.text_speaks (по умолчанию false)."""
+    try:
+        from kivi.config import load_config
+
+        api = (load_config().model_dump().get("api") or {})
+        return bool(api.get("text_speaks", False))
+    except Exception:  # noqa: BLE001 - без конфига озвучку текста не включаем
+        return False
+
+
+def get_text_speaks() -> bool:
+    """Озвучивать ли текстовые ответы: prefs перекрывает config, читается каждый раз."""
+    data = load_prefs()
+    if TEXT_SPEAKS_KEY in data:
+        return bool(data.get(TEXT_SPEAKS_KEY))
+    return config_text_speaks_default()
+
+
+def set_text_speaks(value: Any) -> bool:
+    """Сохранить флаг озвучки текста в prefs.json и вернуть его."""
+    global _cache, _loaded_mtime
+    flag = bool(value)
+    with _LOCK:
+        data = dict(DEFAULT_PREFS)
+        data.update(_read_file())
+        data[TEXT_SPEAKS_KEY] = flag
+        path = Path(PREFS_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp.replace(path)
+        _cache = data
+        _loaded_mtime = _mtime()
+    logger.info("настройки: text_speaks = {}", "вкл" if flag else "выкл")
+    return flag
 
 
 def reload_prefs() -> float:

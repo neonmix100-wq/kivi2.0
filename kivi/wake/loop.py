@@ -36,6 +36,7 @@ from kivi.audio.recorder import Recorder, Utterance
 from kivi.audio.vad import VAD
 from kivi.brain import fastpath
 from kivi.brain.persona import PERSONA_PROMPT, to_speech
+from kivi.brain.router import complete_safe, stream_safe
 from kivi.brain.session import Session
 from kivi.config import LOG_DIR_PATH as LOG_DIR
 from kivi.config import Settings, get_settings
@@ -194,6 +195,24 @@ def _default_speak(text: str) -> None:
     speak_cached(text)
 
 
+def _default_speak_skill(text: str) -> None:
+    """Озвучка ответа скилла: кэш sha256(text) без ограничения длины."""
+    from kivi.tts.cache import speak_skill_cached
+
+    speak_skill_cached(text)
+
+
+def _text_speaks_enabled() -> bool:
+    """Озвучивать ли текстовые ответы: prefs перекрывает config, читаем каждый turn."""
+    try:
+        from kivi.prefs import get_text_speaks
+
+        return bool(get_text_speaks())
+    except Exception as exc:  # noqa: BLE001 - без prefs текст молчит
+        wake_log.debug("prefs: text_speaks не прочитан: {}", exc)
+        return False
+
+
 class WakeLoop:
     """Слушает микрофон, ловит имя «Киви» и обрабатывает команды."""
 
@@ -222,6 +241,10 @@ class WakeLoop:
         self.recorder = recorder or Recorder(audio)
         self.router = router
         self.speak_fn = speak_fn or _default_speak
+        # Ответы скиллов кэшируются по тексту (без лимита длины).
+        self.speak_skill_fn = (
+            speak_fn if speak_fn is not None else _default_speak_skill
+        )
         self.think_fn = think_fn
         self.on_result = on_result
         self.session = session
@@ -262,6 +285,22 @@ class WakeLoop:
         self._prev_answer_norm = ""
         self._turn_cost_rub = 0.0
         self._planner_cost_rub = 0.0
+        # Разбивка затрат turn (₽): planner/compose/chat/tts/vision/search.
+        self._cost: dict[str, float] = {
+            "planner": 0.0,
+            "compose": 0.0,
+            "chat": 0.0,
+            "tts": 0.0,
+            "vision": 0.0,
+            "search": 0.0,
+        }
+        budget_cfg = self.settings.section("brain").get("budget") or {}
+        try:
+            self._per_turn_warn_rub = float(
+                (budget_cfg or {}).get("per_turn_warn_rub") or 0.5
+            )
+        except (TypeError, ValueError):
+            self._per_turn_warn_rub = 0.5
         try:
             from kivi.skills.broker import set_listen_callback, set_vision_router
 
@@ -639,7 +678,8 @@ class WakeLoop:
             return "", "chat"
         if speak is None:
             if src == "text":
-                speak = bool(self.settings.section("api").get("text_speaks", True))
+                # prefs (тумблер UI) перекрывает config api.text_speaks.
+                speak = _text_speaks_enabled()
             else:
                 speak = True
         started = time.perf_counter()
@@ -666,6 +706,7 @@ class WakeLoop:
                         return response, route
 
                 self._turn_cost_rub = 0.0
+                self._cost = {key: 0.0 for key in self._cost}
                 plan_started = time.perf_counter()
                 plan = self._plan_skill(text, session.history())
                 timing["planner_ms"] = int((time.perf_counter() - plan_started) * 1000.0)
@@ -734,7 +775,7 @@ class WakeLoop:
                         summary_task_type="strong",
                     )
                 if facts_ready and response and speak:
-                    self._say(response)
+                    self._say_skill(response)
                 timing["memory_ms"] = int(self._memory_ms)
                 if self._tts_first_ms >= 0:
                     timing["tts_first_ms"] = int(self._tts_first_ms)
@@ -791,7 +832,26 @@ class WakeLoop:
         fast_kind: str = "",
         cost_rub: float = 0.0,
     ) -> None:
-        """Единый turn-лог с замерами задержек (мс) и стоимостью turn."""
+        """turn-лог: задержки, разбивка затрат и WARNING о дорогом turn."""
+        breakdown = {
+            key: round(float(self._cost.get(key, 0.0)), 5)
+            for key in ("planner", "compose", "chat", "tts", "vision", "search")
+        }
+        breakdown["planner"] = round(
+            float(max(breakdown["planner"], self._planner_cost_rub)), 5
+        )
+        total = round(sum(breakdown.values()) or float(cost_rub), 5)
+        if total > self._per_turn_warn_rub:
+            wake_log.warning(
+                "бюджет: per_turn_warn {:.2f}₽ превышен — turn {:.3f}₽ "
+                "(planner={:.3f}, compose={:.3f}, chat={:.3f}, search={:.3f})",
+                self._per_turn_warn_rub,
+                total,
+                breakdown["planner"],
+                breakdown["compose"],
+                breakdown["chat"],
+                breakdown["search"],
+            )
         month_spent = 0.0
         try:
             if self.router is not None and hasattr(self.router, "budget"):
@@ -801,7 +861,7 @@ class WakeLoop:
         wake_log.info(
             "turn: source={}, route={}, fast={}, {:.0f} мс, "
             "planner_ms={}, memory_ms={}, first_sound_ms={}, tts_first_ms={}, "
-            "cost={:.5f}₽, month={:.2f}₽, ответ {!r}",
+            "cost={:.5f}₽, cost_breakdown={}, month={:.2f}₽, ответ {!r}",
             source,
             route,
             fast_kind or "-",
@@ -810,7 +870,8 @@ class WakeLoop:
             int(timing.get("memory_ms", 0)),
             int(timing.get("first_sound_ms", -1)),
             int(timing.get("tts_first_ms", -1)),
-            float(cost_rub),
+            total,
+            breakdown,
             month_spent,
             str(response or "")[:80],
         )
@@ -949,16 +1010,14 @@ class WakeLoop:
             # поэтому здесь ничего не озвучиваем и не отдаём как текст.
             return text
         if text and speak:
-            self._say(text)
+            # Ответ скилла детерминирован — кэшируем по тексту без лимита длины.
+            self._say_skill(text)
         return text
 
     def _compose_facts(
         self, command: str, raw: str, history: list[dict] | None
     ) -> str | None:
-        """JSON-данные скилла facts -> короткая фраза думающей модели.
-
-        None — данных нет (маркер/ошибка), решение о поиске принимает caller.
-        """
+        """JSON-данные скилла facts -> короткая фраза дешёвой модели (tier cheap)."""
         from kivi.skills.facts_compose import compose_answer, parse_payload
 
         payload = parse_payload(raw)
@@ -966,6 +1025,7 @@ class WakeLoop:
             return None
         text, cost = compose_answer(command, payload, history, router=self.router)
         self._turn_cost_rub += float(cost)
+        self._cost["compose"] = self._cost.get("compose", 0.0) + float(cost)
         wake_log.info(
             "facts: {} -> {!r} ({:.5f} руб)",
             payload.get("kind"),
@@ -1019,12 +1079,17 @@ class WakeLoop:
             elif self.router is None:
                 wake_log.warning("роутер не задан — команду не обрабатываю: {!r}", command)
             elif hasattr(self.router, "complete_stream"):
-                for chunk in self.router.complete_stream(messages, task_type="chat"):
+                for chunk in stream_safe(
+                    self.router, messages, task_type="chat", max_tokens=400
+                ):
                     parts.append(chunk)
                     speaker.feed(chunk)
             else:
                 # Заглушки (например, DryRouter в смоуке) умеют только complete.
-                result = self.router.complete(messages, task_type="chat")
+                result = complete_safe(
+                    self.router, messages, task_type="chat", max_tokens=400
+                )
+                self._cost["chat"] += float((result or {}).get("cost_rub") or 0.0)
                 text = str((result or {}).get("text") or "")
                 if text:
                     parts.append(text)
@@ -1106,11 +1171,16 @@ class WakeLoop:
             elif self.router is None:
                 wake_log.warning("роутер не задан — команду не обрабатываю: {!r}", command)
             elif speaker is not None and hasattr(self.router, "complete_stream"):
-                for chunk in self.router.complete_stream(messages, task_type="chat"):
+                for chunk in stream_safe(
+                    self.router, messages, task_type="chat", max_tokens=400
+                ):
                     parts.append(chunk)
                     speaker.feed(chunk)
             else:
-                result = self.router.complete(messages, task_type="chat")
+                result = complete_safe(
+                    self.router, messages, task_type="chat", max_tokens=400
+                )
+                self._cost["chat"] += float((result or {}).get("cost_rub") or 0.0)
                 text = str((result or {}).get("text") or "")
                 if text:
                     parts.append(text)
@@ -1139,7 +1209,7 @@ class WakeLoop:
         *,
         speak: bool,
         use_facts: bool = True,
-        summary_task_type: str = "chat",
+        summary_task_type: str = "summarize",
     ) -> str:
         """Поиск без записи в session; озвучка по флагу speak.
 
@@ -1356,6 +1426,7 @@ class WakeLoop:
             self._planner_cost_rub = float(last_call().get("cost_rub") or 0.0)
         except Exception:  # noqa: BLE001 - стоимость только для лога
             self._planner_cost_rub = 0.0
+        self._cost["planner"] = self._planner_cost_rub
         if plan.get("skill") is not None:
             wake_log.info(
                 "планировщик: умение {} (источник {})",
@@ -1679,6 +1750,21 @@ class WakeLoop:
             self.speak_fn(phrase)
         except Exception as exc:  # noqa: BLE001 - TTS может упасть
             wake_log.error("озвучка упала: {}: {}", type(exc).__name__, exc)
+        finally:
+            self._speaking = False
+            self.state = "IDLE"
+
+    def _say_skill(self, text: str) -> None:
+        """Озвучка детерминированного ответа скилла через sha256-кэш текста."""
+        phrase = " ".join(str(text).split())
+        if not phrase:
+            return
+        self.state = "SPEAKING"
+        self._speaking = True
+        try:
+            self.speak_skill_fn(phrase)
+        except Exception as exc:  # noqa: BLE001 - TTS может упасть
+            wake_log.error("озвучка скилла упала: {}: {}", type(exc).__name__, exc)
         finally:
             self._speaking = False
             self.state = "IDLE"

@@ -130,8 +130,9 @@ def main() -> int:
     print(f"    ответ: {answer!r}")
     ok &= check("ответ непустой", bool(answer))
     ok &= check(
-        "task_type=chat",
-        bool(router.calls) and router.calls[0]["task_type"] == "chat",
+        "task_type сводки (summarize/chat)",
+        bool(router.calls) and router.calls[0]["task_type"] in ("summarize", "chat"),
+        str(router.calls[0]["task_type"] if router.calls else None),
     )
     prompt = system_text(router.calls[0]) if router.calls else ""
     ok &= check("история в промпте сводки", "90 тысяч" in prompt)

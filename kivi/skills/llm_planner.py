@@ -28,6 +28,7 @@ from typing import Any
 
 from loguru import logger
 
+from kivi.brain.router import complete_safe
 from kivi.skills.registry import SkillManifest, SkillRegistry, get_registry
 
 __all__ = [
@@ -50,52 +51,30 @@ SYSTEM_PROMPT = """Ты — планировщик умений Киви. По �
 {"skill_name": "имя" | null, "args": {}, "route": "skill|search|chat|action_gap",
  "confidence": 0.0, "missing": [{"capability": "...", "why": "..."}]}
 Правила:
-- skill — каталог покрывает команду (skill_name обязателен, missing=[]);
-- chat — разговор/генерация: анекдот, история, объяснение, перевод, совет (missing=[]);
-- search — живые данные: курс, погода, новости, цены, результаты, факты \
-кто/что/когда/сколько (missing=[]);
-- action_gap — действие над миром без инструмента: устройство, письмо, файл, \
-покупка (capability=намерение).
-- Если команда содержит «запомни/добавь в расписание/поставь задачу/запиши/ \
-не забудь что» и в ней есть что запомнить — route=skill, skill_name=remember, \
-НЕ action_gap. args: {kind: schedule|task|preference|fact, what, when?}. \
-Если есть время/«каждый будний день»/«в 15:00» — kind=schedule, when=это время; \
-если «задача/купи/сделать» — kind=task; если «люблю/предпочитаю» — preference; \
-иначе fact.
-- Если команда «напомни в/поставь напоминание на/разбуди в» — route=skill, \
-skill_name=reminders, args: {time, what}.
-- Если «напомни/разбуди» БЕЗ времени или даты (например, «напомни купить корм») — \
-route=skill, skill_name=remember, args: {kind: task, what}.
-- Если вопрос «во сколько ...» или «когда ...» про личные планы/записи/ \
-напоминания (в том числе «стендап во сколько»), «что завтра», \
-«что у меня завтра/сегодня» — route=skill, skill_name=recall.
-- Если команда «мои задачи/что нужно сделать/список дел» — route=skill, \
-skill_name=tasks_list.
-- Если «что ты умеешь/что ты можешь/твои возможности/список умений» — \
-route=skill, skill_name=capabilities.
-- Если спрашивают про доступ/разрешения/«что тебе нужно»/«почему не можешь» — \
-route=skill, skill_name=capabilities (отвечает по манифесту).
-- Если «курс валюты/сколько стоит доллар/евро/погода/температура» — route=skill, \
-skill_name=facts. Извлеки СУЩНОСТИ в args и поставь confidence 0..1:
-  * крипта: {"kind": "crypto", "coin": "bitcoin|ethereum|solana|dogecoin|toncoin|ripple|litecoin"};
-  * валюта: {"kind": "currency", "base": "USD|EUR|RUB|CNY|...", "quote": "RUB|USD|..."};
-  * погода: {"kind": "weather", "city": "Новосибирск"};
-  * «курс биткоина к доллару» — это crypto (coin=bitcoin), НЕ currency.
-  * Если сущность явно названа, но её нет в списке (неизвестная монета/валюта) — \
-route=search, skill_name=null.
-  * Если confidence < 0.6 — route=search, skill_name=null.
-  * Поправка («я просил X, а не Y», «не то», «опять», «снова») — бери ИСПРАВЛЕННУЮ \
-сущность из последней реплики и НЕ повторяй прежний ошибочный маршрут.
-- Если «что на экране/что я вижу/посмотри на экран/что открыто/прочитай ошибку \
-с экрана/что за окно» — route=skill, skill_name=screen_look.
-- Если «выруби/выключи/поставь на паузу прослушку» или «не слушай» — \
-route=skill, skill_name=listen_control, args: {action: pause}.
-- Если «включи/возобнови прослушку/слушай снова» — route=skill, \
-skill_name=listen_control, args: {action: resume}.
-- Если «очисти/удали расписание|напоминания|задачу» — route=skill, \
-skill_name=memory_manage, args: {target: schedule|reminders|tasks, \
-action: clear|delete, what?}. Для «удали расписание/напоминания» action=clear. \
-Для «закрой/отметь выполненной задачу» action=done.
+- skill — каталог покрывает команду; chat — разговор/генерация;
+  search — живые данные (курс, погода, новости, цены, факты кто/что/когда/сколько);
+  action_gap — действие без инструмента (устройство, письмо, файл, покупка).
+- «запомни/в расписание/поставь задачу/запиши» -> remember, args {kind:
+  schedule|task|preference|fact, what, when?}: со временем — schedule, «купи/сделать» —
+  task, «люблю/предпочитаю» — preference, иначе fact.
+- «напомни в/разбуди в» -> reminders {time, what}; без времени -> remember {kind: task, what}.
+- «во сколько/когда/что завтра/что у меня сегодня» про планы -> recall;
+  «мои задачи/список дел» -> tasks_list.
+- «что ты умеешь/возможности» и вопросы про доступ/разрешения/«почему не можешь»
+  -> capabilities.
+- курс валюты/погода -> facts + СУЩНОСТИ + confidence:
+  {"kind":"crypto","coin":"bitcoin|ethereum|solana|dogecoin|toncoin|ripple|litecoin"};
+  {"kind":"currency","base":"USD|EUR|RUB|CNY|...","quote":"RUB|..."};
+  {"kind":"weather","city":"Новосибирск"}.
+  «курс биткоина к доллару» — crypto, не currency. Сущность названа, но не из списка
+  -> search; confidence < 0.6 -> search.
+- Поправка («я просил X, а не Y», «не то», «опять», «снова») — бери исправленную
+  сущность и не повторяй прежнюю ошибку.
+- «что на экране/посмотри на экран/прочитай ошибку» -> screen_look.
+- «выруби/пауза прослушку/не слушай» -> listen_control {action: pause};
+  «включи/слушай снова» -> resume.
+- «очисти/удали расписание|напоминания|задачу» -> memory_manage {target:
+  schedule|reminders|tasks, action: clear|delete|done, what?}.
 Умения вне каталога не выдумывай."""
 
 # Последний вызов: причина fallback, маршрут, стоимость, модель. Нужен planner.py и смоукам.
@@ -156,10 +135,9 @@ def _use_count(registry: SkillRegistry, manifest: SkillManifest) -> int:
 def build_catalog(
     registry: SkillRegistry | None = None, max_tokens: int | None = None
 ) -> str:
-    """Каталог для промпта: по строке на скилл, top-30 по use_count.
+    """Компактный каталог: name + 3 triggers, без описаний (экономия IN-токенов).
 
-    Формат строки: "- {name}: {description}. triggers: {первые 5}".
-    Если строки не влезают в бюджет токенов — описание обрезается.
+    Формат строки: "- {name}: {trigger1}, {trigger2}, {trigger3}".
     """
     active = registry if registry is not None else get_registry()
     limit_tokens = max(60, int(max_tokens or _catalog_tokens()))
@@ -173,15 +151,12 @@ def build_catalog(
     lines: list[str] = []
     used = 0
     for manifest in skills:
-        triggers = ", ".join(manifest.triggers[:5])
-        description = " ".join(manifest.description.split())
-        tail = f". triggers: {triggers}"
-        line = f"- {manifest.name}: {description}{tail}"
+        triggers = ", ".join(manifest.triggers[:3])
+        line = f"- {manifest.name}: {triggers}".rstrip(": ")
+        if not triggers:
+            line = f"- {manifest.name}"
         if used + len(line) + 1 > budget_chars:
-            room = budget_chars - used - len(manifest.name) - len(tail) - 8
-            if room < 12:
-                break  # бюджет каталога исчерпан
-            line = f"- {manifest.name}: {description[:room].rstrip()}…{tail}"
+            break  # бюджет каталога исчерпан
         lines.append(line)
         used += len(line) + 1
     return "\n".join(lines)
@@ -373,10 +348,19 @@ def plan_with_llm(
 
     active = registry if registry is not None else get_registry()
     catalog = build_catalog(active, max_tokens)
-    history_text = _history_lines(history, limit=4)
-    system = (
-        SYSTEM_PROMPT
-        + "\n\nПОСЛЕДНИЕ РЕПЛИКИ (для поправок):\n"
+    # Для поправок хватает последней пары реплик: экономия IN-токенов.
+    history_text = _history_lines(history, limit=2)
+    try:
+        from kivi.brain.selfmodel import build_manifest
+
+        manifest = build_manifest(compact=True)
+    except Exception:  # noqa: BLE001 - без манифеста планировщик работает
+        manifest = ""
+    system = SYSTEM_PROMPT
+    if manifest:
+        system += "\n\nМОЁ СОСТОЯНИЕ (кратко):\n" + manifest
+    system += (
+        "\n\nПОСЛЕДНИЕ РЕПЛИКИ (для поправок):\n"
         + history_text
         + "\n\nКАТАЛОГ:\n"
         + (catalog or "(каталог пуст)")
@@ -395,7 +379,9 @@ def plan_with_llm(
     started = time.perf_counter()
     try:
         active_router = router if router is not None else _default_router()
-        result = active_router.complete(messages, task_type="intent")
+        result = complete_safe(
+            active_router, messages, task_type="intent", max_tokens=200
+        )
     except Exception as exc:  # noqa: BLE001 - сеть/бюджет/провайдер
         elapsed = (time.perf_counter() - started) * 1000.0
         _remember(
@@ -421,6 +407,34 @@ def plan_with_llm(
     model = str(body.get("model") or "")
 
     parsed, reason = _validate(_extract_json(raw), active)
+    if parsed is None:
+        stripped = raw.strip()
+        truncated = (not stripped) or (
+            stripped.startswith("{") and not stripped.endswith("}")
+        )
+        if truncated:
+            # Модель ушла в рассуждения и JSON обрезался по max_tokens=200.
+            # Один повтор с запасом: качество важнее формального лимита.
+            logger.warning(
+                "планировщик: ответ обрезан по max_tokens=200 — повтор без лимита"
+            )
+            try:
+                retry = complete_safe(
+                    active_router, messages, task_type="intent", max_tokens=None
+                )
+            except Exception as exc:  # noqa: BLE001 - сеть/бюджет
+                logger.warning(
+                    "планировщик: повтор не удался: {}: {}",
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                retry_body = retry or {}
+                raw = str(retry_body.get("text") or "")
+                cost += float(retry_body.get("cost_rub") or 0.0)
+                model = str(retry_body.get("model") or model)
+                elapsed = (time.perf_counter() - started) * 1000.0
+                parsed, reason = _validate(_extract_json(raw), active)
     if parsed is None:
         attempted = None
         payload = _extract_json(raw)

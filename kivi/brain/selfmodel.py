@@ -115,8 +115,31 @@ def _enabled_names(registry: Any | None) -> list[str]:
         return []
 
 
-def build_manifest(registry: Any | None = None) -> str:
-    """Текст манифеста (~200 токенов) для system-промпта."""
+def _compact_manifest(registry: Any | None) -> str:
+    """Короткий манифест (~120 токенов) для планировщика."""
+    names = _enabled_names(registry)
+    search_enabled = bool(_config_section("search").get("enabled", True))
+    parts = [
+        "МОЁ СОСТОЯНИЕ:",
+        "поиск в интернете есть (DuckDuckGo + страницы + открытые API курсов, "
+        "крипты и погоды, без ключей)" if search_enabled else "поиск выключен",
+        "память, расписание, напоминания, время — локально",
+        "код через OpenCode; зрение по команде; громкость и прослушка по команде",
+    ]
+    if "facts" in names:
+        parts.append("факты о курсах/погоде берутся из API")
+    parts.append("почты и умного дома нет.")
+    parts.append(
+        "Не говори «нет доступа к сети» и не выдумывай разрешения; "
+        "при сбое называй конкретный сбой."
+    )
+    return "\n".join(parts)
+
+
+def build_manifest(registry: Any | None = None, *, compact: bool = False) -> str:
+    """Текст манифеста для system-промпта (compact=True — ~120 токенов)."""
+    if compact:
+        return _compact_manifest(registry)
     names = _enabled_names(registry)
     search_enabled = bool(_config_section("search").get("enabled", True))
     has_facts = "facts" in names

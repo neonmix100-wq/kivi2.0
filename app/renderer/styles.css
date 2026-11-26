@@ -356,6 +356,32 @@ input {
   gap: 16px;
 }
 
+/* Тумблер «Озвучивать текстовые ответы» (Чат и Настройки). */
+.chat-options {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+
 .volume-row input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
