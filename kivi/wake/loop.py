@@ -279,6 +279,8 @@ class WakeLoop:
         self.paused = False
         # Замеры последнего turn: уходят в лог и в событие turn для UI.
         self._memory_ms = 0
+        # Фоновая сборка памяти параллельно планировщику.
+        self._memory_prefetch: tuple[str, Any, ThreadPoolExecutor] | None = None
         self._tts_first_ms = -1
         self._last_fast_timing: dict[str, int] = {}
         # Композиция ответа и защита от повторов на поправку.
@@ -707,6 +709,9 @@ class WakeLoop:
 
                 self._turn_cost_rub = 0.0
                 self._cost = {key: 0.0 for key in self._cost}
+                # Память собираем параллельно планировщику: к моменту chat-ответа
+                # блок уже готов и не добавляет задержку.
+                self._start_memory_prefetch(text)
                 plan_started = time.perf_counter()
                 plan = self._plan_skill(text, session.history())
                 timing["planner_ms"] = int((time.perf_counter() - plan_started) * 1000.0)
@@ -820,6 +825,7 @@ class WakeLoop:
                 fast_kind,
                 cost_rub=self._planner_cost_rub + self._turn_cost_rub,
             )
+            self._cleanup_memory_prefetch()
         return response, route
 
     def _log_turn(
@@ -1420,12 +1426,16 @@ class WakeLoop:
         except Exception as exc:  # noqa: BLE001 - планировщик не должен ронять цикл
             wake_log.warning("планировщик упал: {}: {}", type(exc).__name__, exc)
             return None
-        try:
-            from kivi.skills.llm_planner import last_call
-
-            self._planner_cost_rub = float(last_call().get("cost_rub") or 0.0)
-        except Exception:  # noqa: BLE001 - стоимость только для лога
+        if plan.get("cached"):
+            # План из кэша: LLM не вызывалась, значит и цены у этого turn нет.
             self._planner_cost_rub = 0.0
+        else:
+            try:
+                from kivi.skills.llm_planner import last_call
+
+                self._planner_cost_rub = float(last_call().get("cost_rub") or 0.0)
+            except Exception:  # noqa: BLE001 - стоимость только для лога
+                self._planner_cost_rub = 0.0
         self._cost["planner"] = self._planner_cost_rub
         if plan.get("skill") is not None:
             wake_log.info(
@@ -1551,44 +1561,73 @@ class WakeLoop:
             parts.append(memory)
         return "\n\n".join(parts)
 
+    def _build_memory(self, query: str) -> str:
+        """Собрать блок памяти: ядро сразу, семантика — только если успела (0.3 с)."""
+        from kivi.memory.inject import build_memory_block
+
+        return str(build_memory_block(query, budget_s=0.3) or "")
+
+    def _start_memory_prefetch(self, query: str) -> None:
+        """Начать сборку памяти в фоне, пока работает планировщик."""
+        self._cleanup_memory_prefetch()
+        if not self.memory_enabled:
+            return
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kivi-memory-pre")
+        future = executor.submit(self._build_memory, query)
+        self._memory_prefetch = (query, future, executor)
+
+    def _cleanup_memory_prefetch(self) -> None:
+        """Снять неиспользованный prefetch памяти (маршрут skill/search)."""
+        prefetch = self._memory_prefetch
+        self._memory_prefetch = None
+        if prefetch is not None:
+            try:
+                prefetch[2].shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001 - фон не должен ломать turn
+                pass
+
+    def _core_fallback(self) -> str:
+        """Хотя бы локальное ядро: контекст не должен быть пустым."""
+        try:
+            from kivi.memory.inject import _core_block
+            from kivi.memory.vault import vault_root
+
+            return str(_core_block(vault_root()) or "")
+        except Exception:  # noqa: BLE001 - память не критична
+            return ""
+
     def _memory_block(self, query: str) -> str:
         """Блок памяти для системного промпта (пусто, если vault пуст).
 
-        Жёсткий бюджет MEMORY_BUDGET_S: память не должна задерживать первый
-        звук. Не уложились — отвечаем без блока и пишем предупреждение.
+        Ядро памяти собирается заранее (параллельно планировщику). Жёсткий
+        бюджет MEMORY_BUDGET_S остаётся: семантика не должна задерживать ответ.
         """
         self._memory_ms = 0
         if not self.memory_enabled:
+            self._cleanup_memory_prefetch()
             return ""
         started = time.perf_counter()
-
-        def _build() -> str:
-            from kivi.memory.inject import build_memory_block
-
-            # Семантика внутри ядра ограничена 0.5 с, чтобы гарантированно
-            # уложиться в общий бюджет 0.8 с и не потерять локальное ядро.
-            return str(build_memory_block(query, budget_s=0.5) or "")
-
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kivi-memory")
+        prefetch = self._memory_prefetch
+        self._memory_prefetch = None
+        if prefetch is not None and prefetch[0] == query:
+            _, future, executor = prefetch
+        else:
+            if prefetch is not None:
+                try:
+                    prefetch[2].shutdown(wait=False, cancel_futures=True)
+                except Exception:  # noqa: BLE001 - фон не должен ломать turn
+                    pass
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kivi-memory")
+            future = executor.submit(self._build_memory, query)
         try:
-            future = executor.submit(_build)
-            block = future.result(timeout=MEMORY_BUDGET_S)
+            block = str(future.result(timeout=MEMORY_BUDGET_S) or "")
         except FuturesTimeoutError:
             self._memory_ms = int((time.perf_counter() - started) * 1000.0)
             wake_log.warning(
                 "память: пропуск по бюджету {:.1f}с — отвечаю без блока памяти",
                 MEMORY_BUDGET_S,
             )
-            # Хотя бы локальное ядро: контекст не должен быть пустым.
-            # Берём именно ядро (файлы, без сети), а не общий build: так
-            # медленная семантика не тормозит turn повторно.
-            try:
-                from kivi.memory.inject import _core_block
-                from kivi.memory.vault import vault_root
-
-                core = str(_core_block(vault_root()) or "")
-            except Exception:  # noqa: BLE001 - память не критична
-                core = ""
+            core = self._core_fallback()
             if core:
                 wake_log.info("память: отдаю только локальное ядро ({} симв.)", len(core))
             return core
@@ -1597,7 +1636,10 @@ class WakeLoop:
             self._memory_ms = int((time.perf_counter() - started) * 1000.0)
             return ""
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001 - фон не должен ломать turn
+                pass
         self._memory_ms = int((time.perf_counter() - started) * 1000.0)
         if block:
             wake_log.debug("память: блок {} символов за {} мс", len(block), self._memory_ms)

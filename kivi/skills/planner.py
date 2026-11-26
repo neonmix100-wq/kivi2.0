@@ -49,6 +49,9 @@ DEFAULT_MIN_SCORE = 0.75
 
 STRATEGIES = ("llm_with_fallback", "llm_only", "fuzzy_only")
 DEFAULT_STRATEGY = "llm_with_fallback"
+PLAN_CACHE_MAX = 50  # повторный одинаковый запрос не должен стоить planner-вызова
+# Поправки зависят от предыдущей пары реплик — их кэшируем с историей в ключе.
+CORRECTION_HINTS = ("я просил", "я просила", "а не", "не то", "опять", "снова", "поправ")
 
 
 def _planner_config() -> dict[str, Any]:
@@ -105,6 +108,8 @@ class Planner:
 
         self.router = router
         self.gaps = gaps if gaps is not None else get_gap_log()
+        # Кэш планов: ключ — команда + последняя пара реплик истории.
+        self._plan_cache: dict[str, dict[str, Any]] = {}
 
     def _fast_plan(self, command: str) -> dict[str, Any] | None:
         """Правило без LLM только для мета-вопросов о себе -> capabilities.
@@ -139,7 +144,46 @@ class Planner:
             return manifest, {}
         return None
 
+    @staticmethod
+    def _cache_key(text: str, history: list[dict] | None) -> str:
+        """Ключ кэша: команда; для поправок ещё и последняя пара реплик."""
+        lowered = text.lower().replace("ё", "е")
+        if not any(hint in lowered for hint in CORRECTION_HINTS):
+            return lowered
+        tail = [
+            str(item.get("text") or item.get("content") or "")
+            for item in list(history or [])[-2:]
+        ]
+        return "|".join([lowered, *tail])
+
     def plan(
+        self, command: str, history: list[dict] | None = None
+    ) -> dict[str, Any]:
+        """План обработки команды; одинаковый повтор берётся из кэша."""
+        text = " ".join(str(command or "").split())
+        if not text:
+            return {
+                "skill": None,
+                "args": {},
+                "missing": [],
+                "source": "none",
+                "route": "chat",
+                "gap_id": None,
+            }
+        key = self._cache_key(text, history)
+        cached = self._plan_cache.get(key)
+        if cached is not None:
+            logger.info("планировщик: план из кэша '{}'", text[:40])
+            reused = dict(cached)
+            reused["cached"] = True
+            return reused
+        plan = self._plan_uncached(text, history)
+        if len(self._plan_cache) >= PLAN_CACHE_MAX:
+            self._plan_cache.clear()
+        self._plan_cache[key] = dict(plan)
+        return plan
+
+    def _plan_uncached(
         self, command: str, history: list[dict] | None = None
     ) -> dict[str, Any]:
         """План обработки команды: скилл+аргументы или missing с причиной."""
