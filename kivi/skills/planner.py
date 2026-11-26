@@ -27,7 +27,6 @@ from typing import Any
 from loguru import logger
 
 from kivi.brain.selfmodel import is_meta_question
-from kivi.skills.facts_intent import classify as classify_facts
 from kivi.skills.gaps import GapLog, get_gap_log
 from kivi.skills.llm_planner import (
     DEFAULT_CATALOG_TOKENS,
@@ -108,7 +107,11 @@ class Planner:
         self.gaps = gaps if gaps is not None else get_gap_log()
 
     def _fast_plan(self, command: str) -> dict[str, Any] | None:
-        """Правила без LLM: мета-вопрос -> capabilities, курс/погода -> facts."""
+        """Правило без LLM только для мета-вопросов о себе -> capabilities.
+
+        Курс/погода fast-правил НЕ имеют: сущности извлекает LLM-планировщик,
+        иначе жадные триггеры отвечают не про ту валюту/монету.
+        """
         if is_meta_question(command):
             manifest = self.registry.get("capabilities")
             if manifest is not None and manifest.enabled:
@@ -116,21 +119,6 @@ class Planner:
                 return {
                     "skill": manifest,
                     "args": {"command": command},
-                    "missing": [],
-                    "source": "fast",
-                    "route": "skill",
-                    "gap_id": None,
-                }
-        params = classify_facts(command)
-        if params is not None:
-            manifest = self.registry.get("facts")
-            if manifest is not None and manifest.enabled:
-                logger.info(
-                    "планировщик: {} -> facts (без LLM)", params.get("kind")
-                )
-                return {
-                    "skill": manifest,
-                    "args": {**params, "command": command},
                     "missing": [],
                     "source": "fast",
                     "route": "skill",

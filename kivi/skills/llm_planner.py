@@ -48,7 +48,7 @@ ROUTES = ("skill", "search", "chat", "action_gap")
 SYSTEM_PROMPT = """Ты — планировщик умений Киви. По команде и каталогу выбери маршрут.
 Ответ — СТРОГО JSON без markdown:
 {"skill_name": "имя" | null, "args": {}, "route": "skill|search|chat|action_gap",
- "missing": [{"capability": "...", "why": "..."}]}
+ "confidence": 0.0, "missing": [{"capability": "...", "why": "..."}]}
 Правила:
 - skill — каталог покрывает команду (skill_name обязателен, missing=[]);
 - chat — разговор/генерация: анекдот, история, объяснение, перевод, совет (missing=[]);
@@ -75,8 +75,17 @@ skill_name=tasks_list.
 route=skill, skill_name=capabilities.
 - Если спрашивают про доступ/разрешения/«что тебе нужно»/«почему не можешь» — \
 route=skill, skill_name=capabilities (отвечает по манифесту).
-- Если «курс валюты/сколько стоит доллар/евро/погода/температура/будет ли дождь» — \
-route=skill, skill_name=facts, args: {kind: currency|weather, base?, quote?, city?}.
+- Если «курс валюты/сколько стоит доллар/евро/погода/температура» — route=skill, \
+skill_name=facts. Извлеки СУЩНОСТИ в args и поставь confidence 0..1:
+  * крипта: {"kind": "crypto", "coin": "bitcoin|ethereum|solana|dogecoin|toncoin|ripple|litecoin"};
+  * валюта: {"kind": "currency", "base": "USD|EUR|RUB|CNY|...", "quote": "RUB|USD|..."};
+  * погода: {"kind": "weather", "city": "Новосибирск"};
+  * «курс биткоина к доллару» — это crypto (coin=bitcoin), НЕ currency.
+  * Если сущность явно названа, но её нет в списке (неизвестная монета/валюта) — \
+route=search, skill_name=null.
+  * Если confidence < 0.6 — route=search, skill_name=null.
+  * Поправка («я просил X, а не Y», «не то», «опять», «снова») — бери ИСПРАВЛЕННУЮ \
+сущность из последней реплики и НЕ повторяй прежний ошибочный маршрут.
 - Если «что на экране/что я вижу/посмотри на экран/что открыто/прочитай ошибку \
 с экрана/что за окно» — route=skill, skill_name=screen_look.
 - Если «выруби/выключи/поставь на паузу прослушку» или «не слушай» — \
@@ -96,6 +105,7 @@ _LAST_CALL: dict[str, Any] = {
     "route": None,
     "skill_name": None,
     "skill_attempted": None,
+    "confidence": None,
     "cost_rub": 0.0,
     "model": "",
     "ms": 0.0,
@@ -288,11 +298,19 @@ def _validate(
         # Разговор и поиск закрываются другими путями — пробел не нужен.
         missing = []
 
+    confidence_raw = payload.get("confidence")
+    try:
+        confidence = float(confidence_raw) if confidence_raw is not None else 1.0
+    except (TypeError, ValueError):
+        confidence = 1.0
+    confidence = max(0.0, min(1.0, confidence))
+
     return {
         "skill_name": skill_name,
         "args": args,
         "missing": missing,
         "route": route,
+        "confidence": confidence,
     }, "ok"
 
 
@@ -322,6 +340,19 @@ def _default_router():
     return _router
 
 
+def _history_lines(history: list[dict] | None, limit: int = 4) -> str:
+    """Последние реплики диалога компактно — нужны для поправок."""
+    lines: list[str] = []
+    for item in list(history or [])[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip() or "?"
+        content = " ".join(str(item.get("content") or "").split())
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines) or "(пусто)"
+
+
 def plan_with_llm(
     command: str,
     history: list[dict] | None = None,
@@ -342,7 +373,14 @@ def plan_with_llm(
 
     active = registry if registry is not None else get_registry()
     catalog = build_catalog(active, max_tokens)
-    system = SYSTEM_PROMPT + "\n\nКАТАЛОГ:\n" + (catalog or "(каталог пуст)")
+    history_text = _history_lines(history, limit=4)
+    system = (
+        SYSTEM_PROMPT
+        + "\n\nПОСЛЕДНИЕ РЕПЛИКИ (для поправок):\n"
+        + history_text
+        + "\n\nКАТАЛОГ:\n"
+        + (catalog or "(каталог пуст)")
+    )
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": text},
@@ -414,24 +452,51 @@ def plan_with_llm(
             )
         return None, {}, []
 
+    skill_name = parsed["skill_name"]
+    plan_args = dict(parsed["args"])
+    route = str(parsed["route"])
+    confidence = float(parsed.get("confidence") or 1.0)
+
+    # Сущности facts проверяем здесь: LLM могла назвать неизвестную монету.
+    if skill_name == "facts":
+        from kivi.skills.facts_intent import resolve as resolve_facts
+
+        entities = resolve_facts(plan_args, text)
+        if entities is None:
+            logger.info(
+                "планировщик: сущность facts не маппится ({!r}) -> search", plan_args
+            )
+            skill_name, plan_args, route = None, {}, "search"
+        else:
+            plan_args = {**entities, "command": text}
+    elif skill_name is not None and confidence < 0.6:
+        logger.info(
+            "планировщик: confidence {:.2f} < 0.6 для {} -> search",
+            confidence,
+            skill_name,
+        )
+        skill_name, plan_args, route = None, {}, "search"
+
     _remember(
         ok=True,
         reason="ok",
-        route=parsed["route"],
-        skill_name=parsed["skill_name"],
+        route=route,
+        skill_name=skill_name,
         skill_attempted=None,
+        confidence=confidence,
         cost_rub=cost,
         model=model,
         ms=round(elapsed, 1),
         raw=raw[:300],
     )
     logger.info(
-        "планировщик: {!r} -> {} (route {}, {:.0f} мс, {:.4f} руб)",
+        "планировщик: {!r} -> {} (route {}, confidence {:.2f}, {:.0f} мс, {:.4f} руб)",
         text[:60],
-        parsed["skill_name"] or "нет умения",
-        parsed["route"],
+        skill_name or "нет умения",
+        route,
+        confidence,
         elapsed,
         cost,
     )
-    return parsed["skill_name"], dict(parsed["args"]), list(parsed["missing"])
+    return skill_name, plan_args, list(parsed["missing"])
 

@@ -34,6 +34,7 @@ from kivi.config import get_settings
 from kivi.log import setup_logging
 from kivi.skills.broker import PermissionDenied, SkillContext
 from kivi.skills.gaps import GapLog
+from kivi.skills.facts_compose import deterministic_answer, parse_payload
 from kivi.skills.loader import FALLBACK_MARKER, invoke
 from kivi.skills.planner import Planner
 from kivi.skills.registry import SkillRegistry
@@ -188,10 +189,11 @@ def main() -> int:
         print("FAIL — нет skills/facts/skill.yaml")
         return 1
     ok &= check(
-        "facts: permissions.network — 3 домена",
+        "facts: permissions.network — 4 домена (включая CoinGecko)",
         set(facts.permissions.network)
         == {
             "open.er-api.com",
+            "api.coingecko.com",
             "api.open-meteo.com",
             "geocoding-api.open-meteo.com",
         },
@@ -207,8 +209,11 @@ def main() -> int:
     broker_module.SkillContext._request_text = make_http({})  # type: ignore[assignment]
     try:
         print("\n--- 1) facts: курс валюты ---")
-        answer = invoke(facts, {"command": "курс доллара к рублю"}, registry=registry)
-        print(f"    {answer!r}")
+        raw = invoke(facts, {"command": "курс доллара к рублю"}, registry=registry)
+        payload = parse_payload(raw)
+        answer = deterministic_answer(payload) if payload else raw
+        print(f"    {raw!r} -> {answer!r}")
+        ok &= check("скилл вернул структурированные данные", payload is not None, raw[:80])
         ok &= check("в ответе число 92.4", "92.4" in answer, answer)
         ok &= check("в ответе рубль (₽)", "₽" in answer, answer)
         ok &= check("в ответе названа валюта", "доллара" in answer.lower(), answer)
@@ -222,8 +227,12 @@ def main() -> int:
         ok &= check("брокер не пускает на чужой домен", denied)
 
         print("\n--- 2) facts: погода ---")
-        weather = invoke(facts, {"command": "погода в Новосибирске"}, registry=registry)
-        print(f"    {weather!r}")
+        weather_raw = invoke(facts, {"command": "погода в Новосибирске"}, registry=registry)
+        weather_payload = parse_payload(weather_raw)
+        weather = (
+            deterministic_answer(weather_payload) if weather_payload else weather_raw
+        )
+        print(f"    {weather_raw!r} -> {weather!r}")
         ok &= check("город назван", "Новосибирск" in weather, weather)
         ok &= check("есть температура", "°C" in weather and "-3" in weather, weather)
         ok &= check(
@@ -406,7 +415,13 @@ def main() -> int:
 
         facts_plan = planner.plan("курс доллара к рублю")
         facts_name = getattr(facts_plan.get("skill"), "name", None)
-        ok &= check("курс -> facts без LLM", facts_name == "facts", str(facts_name))
+        # Жадных keyword-правил больше нет: курс решает LLM-планировщик,
+        # поэтому при недоступной LLM здесь не должно быть fast-маршрута facts.
+        ok &= check(
+            "курс не уходит в facts по keyword (нет fast)",
+            facts_plan.get("source") != "fast" and facts_name is None,
+            f"source={facts_plan.get('source')}, skill={facts_name}",
+        )
 
         print("\n--- 7) сбой facts -> fallback в search ---")
 

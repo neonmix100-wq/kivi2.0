@@ -213,8 +213,11 @@ def main() -> int:
 
     original_search = search_module.search_web
     original_summary = search_module.summarize_with_llm
+    original_facts = search_module.try_facts_answer
     summary_text = "Курс биткоина около девяноста тысяч долларов."
     try:
+        # Факты (CoinGecko) в этом смоуке не проверяем: живые данные не нужны.
+        search_module.try_facts_answer = lambda *a, **kw: None  # type: ignore[assignment]
         search_module.search_web = lambda query, max_results=3, timeout=None, **kw: [
             {"title": "Курс", "url": "https://example.com", "snippet": "90000"}
         ]
@@ -306,6 +309,7 @@ def main() -> int:
     finally:
         search_module.search_web = original_search
         search_module.summarize_with_llm = original_summary
+        search_module.try_facts_answer = original_facts  # type: ignore[assignment]
         loop_module.SentenceSpeaker = original_speaker  # type: ignore[assignment]
 
     print("\n--- 5) fillers: ensure_library / pick ---")

@@ -404,7 +404,10 @@ def main() -> int:
     original_ddgs = duckduckgo_search.DDGS
     cache_path = TMP / f"search_cache_{token}.json"
     old_cache_path = search_mod.SEARCH_CACHE_PATH
+    original_facts = search_mod.try_facts_answer
     search_mod.SEARCH_CACHE_PATH = cache_path
+    # Факты (CoinGecko) здесь не проверяем: нужен детерминизм без сети.
+    search_mod.try_facts_answer = lambda *a, **kw: None  # type: ignore[assignment]
     try:
         FakeDDGS.constructors = 0
         FakeDDGS.backend_calls.clear()
@@ -462,6 +465,7 @@ def main() -> int:
     finally:
         duckduckgo_search.DDGS = original_ddgs  # type: ignore[assignment]
         search_mod.SEARCH_CACHE_PATH = old_cache_path
+        search_mod.try_facts_answer = original_facts  # type: ignore[assignment]
 
     print()
     print("PASS" if ok else "FAIL — скопируй весь вывод и пришли в чат")

@@ -202,7 +202,8 @@ fallback_local_and_warn`.
 | `kivi/skills/gap_closer.py` | Попытка закрыть пробел в умениях |
 | `kivi/skills/gaps.py` | Таблица `capability_gaps` в `data/kivi.db` |
 | `kivi/skills/search.py` | DDGS-бэкенды, кэш, deep-read страниц, reformulate, summarize |
-| `kivi/skills/facts_intent.py` | Распознавание «курс валюты»/«погода» без LLM |
+| `kivi/skills/facts_intent.py` | Сущности курс/крипта/погода: coin/база/котировка/город без LLM |
+| `kivi/skills/facts_compose.py` | Композиция ответа по данным facts думающей моделью |
 | `kivi/skills/reminders.py` | `data/reminders.json` и фоновый scheduler |
 | `kivi/skills/recall.py` | Targeted recall расписания/задач из vault |
 | `kivi/wake/detector.py` | Поиск имени «Киви», fuzzy по Левенштейну |
@@ -229,7 +230,7 @@ fallback_local_and_warn`.
 | `listen_control` | system | tool `listen`; safe | Пауза/возобновление VAD |
 | `memory_manage` | data | fs: `D:\Kivi\memory`; tools `fs_read`, `fs_write`, `reminders_write`, `confirm`; risk: confirm | Очистка и закрытие записей только после подтверждения |
 | `capabilities` | system | tool `skills_read`; safe | Список умений и ответы о доступе по манифесту |
-| `facts` | data | net: `open.er-api.com`, `api.open-meteo.com`, `geocoding-api.open-meteo.com`; tool `http_get`; safe | Курс валют и погода из открытых API без ключей |
+| `facts` | data | net: `open.er-api.com`, `api.coingecko.com`, `api.open-meteo.com`, `geocoding-api.open-meteo.com`; tool `http_get`; safe | Курс валют, курс крипты и погода — структурированные данные без ключей |
 | `screen_look` | vision | tools `screenshot`, `vision`; safe | Скриншот экрана и короткое описание |
 
 `skills/installed/` — каталог устанавливаемых скиллов, в git не входит.
@@ -265,7 +266,7 @@ fallback_local_and_warn`.
 | `audio` | `hostapi: Windows WASAPI`; input `Микрофон (fifine SC3)`; output `Наушники (2- Temple Pro Purple)`; capture 48000; target 16000; playback 48000; `soxr`; mono; block 32 мс; `aec: false` | Звук, устройства и ресемплинг |
 | `audio.echo` | `enabled: true`, `corr_threshold: 0.6`, `tail_ms: 600`, `max_delay_ms: 400` | Эхо-гейт |
 | `stt` | `primary: local`, `fallback: polza`, `model: large-v3-turbo`, `compute_type: int8_float16`, `language: ru`, `beam_size: 1` | Распознавание |
-| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing, escalation 3→2→strong, `budget.monthly_rub: 3000`, `warn_at: 0.8`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
+| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing (`chat`/`intent` → **coder**, `memory` → cheap), escalation 3→2→strong, `budget.monthly_rub: 3000`, `warn_at: 0.8`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
 | `brain.local` | `model: qwen3-14b-instruct-q4_k_m`, `ctx: 8192`, `gpu_layers: all` | Резервный локальный профиль |
 | `tts` | `primary: polza_gemini`, `google/gemini-3.8-flash-tts`, `voice: Leda`, `streaming: true`, `base64_response: true`, `audio_format: mp3` | Голос; голос менять нельзя |
 | `skills` | `dir: skills`, `installed_dir: skills/installed`, auto-disable 3, timeout 30 с; browser/vision/music/telegram/home/rag | Реестр и политика скиллов |
@@ -449,10 +450,18 @@ timeout 300 с.
 - Deep-read: если в сниппетах нет ни одной цифры, читаем top-2 страницы
   (`fetch_page`: UA, таймаут 6 с, без тегов, ≤4000 симв.) и отдаём их
   суммаризатору в `<untrusted>`.
-- Факты из открытых API: скилл `facts` (курс — `open.er-api.com`, погода —
-  `open-meteo.com`) отвечает цифрой из источника без ключей; при сбое источника
-  возвращает маркер `FALLBACK_MARKER`, и ядро уходит в `search`, а не в «не умею».
-  Планировщик ведёт «курс/погода» в `facts` без LLM (`kivi/skills/facts_intent.py`).
+- Факты из открытых API: скилл `facts` (валюта — `open.er-api.com`, крипта —
+  `api.coingecko.com`, погода — `open-meteo.com`) возвращает СТРУКТУРИРОВАННЫЙ
+  JSON `{source, kind, values, updated}` без ключей; фразу формулирует
+  `Router.complete(task_type=chat)` (тир coder) по промпту «используй ТОЛЬКО
+  данные» (`kivi/skills/facts_compose.py`), поэтому шаблонных ответов нет.
+  Сущности (`coin/base/quote/city`) из args приоритетны; если сущность названа,
+  но не маппится — `FALLBACK_MARKER` и маршрут `search`, дефолтная пара не
+  подставляется. Жадных keyword-правил в планировщике нет: курс/погоду решает
+  LLM (`confidence`, `history[-4:]`, правило про поправки `я просил … а не …`).
+- Guard повтора: если на поправку («я просил/а не/не то/опять/снова») ответ
+  совпал с предыдущим, маршрут принудительно `search` со сводкой на тире
+  `strong` (`kivi/wake/loop.py`).
 - Манифест себя: `kivi/brain/selfmodel.py` собирается из реестра и `config.yaml`
   и вставляется в system-промпт чата и суммаризатора ВСЕГДА; мета-вопросы
   («что тебе нужно», «есть ли доступ», «почему не можешь») уходят в

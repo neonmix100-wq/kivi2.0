@@ -71,6 +71,19 @@ MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 15.0
 COOLDOWN_S = 1.5
 MEMORY_BUDGET_S = 0.8  # больше не ждём память перед первым звуком
+# Поправка пользователя: ответ нельзя повторять, нужен новый маршрут.
+CORRECTION_MARKERS = ("я просил", "я просила", "а не", "не то", "опять", "снова")
+
+
+def _is_correction(command: str) -> bool:
+    """Пользователь поправляет предыдущий ответ."""
+    text = " ".join(str(command or "").replace("ё", "е").lower().split())
+    return any(marker in text for marker in CORRECTION_MARKERS)
+
+
+def _answer_key(text: str) -> str:
+    """Нормализованный текст ответа для сравнения с предыдущим."""
+    return " ".join(str(text or "").replace("ё", "е").lower().split())
 DIALOG_SILENCE_S = 8.0
 DIALOG_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя, оставлено для совместимости
 FOLLOWUP_WINDOW_S = DIALOG_SILENCE_S  # устаревшее имя
@@ -245,6 +258,10 @@ class WakeLoop:
         self._memory_ms = 0
         self._tts_first_ms = -1
         self._last_fast_timing: dict[str, int] = {}
+        # Композиция ответа и защита от повторов на поправку.
+        self._prev_answer_norm = ""
+        self._turn_cost_rub = 0.0
+        self._planner_cost_rub = 0.0
         try:
             from kivi.skills.broker import set_listen_callback, set_vision_router
 
@@ -648,6 +665,7 @@ class WakeLoop:
                         self._log_turn(src, route, started, response, timing, fast_kind)
                         return response, route
 
+                self._turn_cost_rub = 0.0
                 plan_started = time.perf_counter()
                 plan = self._plan_skill(text, session.history())
                 timing["planner_ms"] = int((time.perf_counter() - plan_started) * 1000.0)
@@ -658,16 +676,23 @@ class WakeLoop:
                     route = "chat"
                 if route == "skill" and (plan is None or plan.get("skill") is None):
                     route = "chat"
+                facts_ready = False
                 if plan is not None and plan.get("skill") is not None:
                     route = "skill"
+                    skill_name = str(getattr(plan["skill"], "name", ""))
                     response = self._run_skill_collect(
                         text,
                         plan["skill"],
                         plan.get("args") or {},
-                        speak=bool(speak),
+                        speak=bool(speak) and skill_name != "facts",
                     )
+                    if skill_name == "facts":
+                        composed = self._compose_facts(text, response, session.history())
+                        if composed is not None:
+                            response = composed
+                            facts_ready = True
                     if response == SKILL_FALLBACK:
-                        # Скилл честно не нашёл цифру: ищем в интернете.
+                        # Скилл честно не нашёл сущность/данные: ищем в интернете.
                         route = "search"
                         wake_log.info("маршрут skill->search: {!r}", text[:60])
                         response = self._answer_search_collect(
@@ -689,6 +714,27 @@ class WakeLoop:
                     response = self._answer_chat_collect(
                         text, plan, started, speak=bool(speak)
                     )
+                # Guard: на поправку нельзя ответить тем же текстом, что и раньше.
+                if (
+                    _is_correction(text)
+                    and response
+                    and self._prev_answer_norm
+                    and route != "search"
+                    and _answer_key(response) == self._prev_answer_norm
+                ):
+                    wake_log.warning("guard: повтор ответа на поправку -> search/strong")
+                    route = "search"
+                    facts_ready = False
+                    response = self._answer_search_collect(
+                        text,
+                        plan,
+                        started,
+                        speak=bool(speak),
+                        use_facts=False,
+                        summary_task_type="strong",
+                    )
+                if facts_ready and response and speak:
+                    self._say(response)
                 timing["memory_ms"] = int(self._memory_ms)
                 if self._tts_first_ms >= 0:
                     timing["tts_first_ms"] = int(self._tts_first_ms)
@@ -722,7 +768,17 @@ class WakeLoop:
                 self._drain()
                 self.vad.reset()
             self.state = "IDLE"
-            self._log_turn(src, route, started, response, timing, fast_kind)
+            if response:
+                self._prev_answer_norm = _answer_key(response)
+            self._log_turn(
+                src,
+                route,
+                started,
+                response,
+                timing,
+                fast_kind,
+                cost_rub=self._planner_cost_rub + self._turn_cost_rub,
+            )
         return response, route
 
     def _log_turn(
@@ -733,11 +789,19 @@ class WakeLoop:
         response: str,
         timing: dict[str, int],
         fast_kind: str = "",
+        cost_rub: float = 0.0,
     ) -> None:
-        """Единый turn-лог с замерами задержек (мс)."""
+        """Единый turn-лог с замерами задержек (мс) и стоимостью turn."""
+        month_spent = 0.0
+        try:
+            if self.router is not None and hasattr(self.router, "budget"):
+                month_spent = float(self.router.budget.month_spent_rub())
+        except Exception:  # noqa: BLE001 - бюджет не должен ломать лог
+            month_spent = 0.0
         wake_log.info(
             "turn: source={}, route={}, fast={}, {:.0f} мс, "
-            "planner_ms={}, memory_ms={}, first_sound_ms={}, tts_first_ms={}, ответ {!r}",
+            "planner_ms={}, memory_ms={}, first_sound_ms={}, tts_first_ms={}, "
+            "cost={:.5f}₽, month={:.2f}₽, ответ {!r}",
             source,
             route,
             fast_kind or "-",
@@ -746,6 +810,8 @@ class WakeLoop:
             int(timing.get("memory_ms", 0)),
             int(timing.get("first_sound_ms", -1)),
             int(timing.get("tts_first_ms", -1)),
+            float(cost_rub),
+            month_spent,
             str(response or "")[:80],
         )
 
@@ -878,8 +944,34 @@ class WakeLoop:
             # Источник не дал данных (сеть/страница): уходим в поиск, не «не умею».
             wake_log.warning("скилл {}: нет данных от источника — fallback в поиск", manifest.name)
             return text
+        if manifest.name == "facts":
+            # facts отдаёт JSON с цифрами: фразу формулирует ядро (Router, coder),
+            # поэтому здесь ничего не озвучиваем и не отдаём как текст.
+            return text
         if text and speak:
             self._say(text)
+        return text
+
+    def _compose_facts(
+        self, command: str, raw: str, history: list[dict] | None
+    ) -> str | None:
+        """JSON-данные скилла facts -> короткая фраза думающей модели.
+
+        None — данных нет (маркер/ошибка), решение о поиске принимает caller.
+        """
+        from kivi.skills.facts_compose import compose_answer, parse_payload
+
+        payload = parse_payload(raw)
+        if payload is None:
+            return None
+        text, cost = compose_answer(command, payload, history, router=self.router)
+        self._turn_cost_rub += float(cost)
+        wake_log.info(
+            "facts: {} -> {!r} ({:.5f} руб)",
+            payload.get("kind"),
+            text[:80],
+            cost,
+        )
         return text
 
     def _answer_chat(self, command: str, plan: dict | None, started: float) -> str:
@@ -1047,8 +1139,12 @@ class WakeLoop:
         *,
         speak: bool,
         use_facts: bool = True,
+        summary_task_type: str = "chat",
     ) -> str:
-        """Поиск без записи в session; озвучка по флагу speak."""
+        """Поиск без записи в session; озвучка по флагу speak.
+
+        summary_task_type="strong" — усиленная сводка (guard повтора).
+        """
         from kivi.skills.search import NO_DATA_ANSWER, answer_search
 
         self.state = "THINKING"
@@ -1072,6 +1168,7 @@ class WakeLoop:
                 max_results=max_results,
                 timeout=timeout_s,
                 use_facts=use_facts,
+                summary_task_type=summary_task_type,
             )
             text = " ".join(str(text or "").split())
         except Exception as exc:  # noqa: BLE001 - поиск не должен ронять цикл
@@ -1253,6 +1350,12 @@ class WakeLoop:
         except Exception as exc:  # noqa: BLE001 - планировщик не должен ронять цикл
             wake_log.warning("планировщик упал: {}: {}", type(exc).__name__, exc)
             return None
+        try:
+            from kivi.skills.llm_planner import last_call
+
+            self._planner_cost_rub = float(last_call().get("cost_rub") or 0.0)
+        except Exception:  # noqa: BLE001 - стоимость только для лога
+            self._planner_cost_rub = 0.0
         if plan.get("skill") is not None:
             wake_log.info(
                 "планировщик: умение {} (источник {})",

@@ -304,11 +304,13 @@ def _enrich_results(results: list[dict[str, Any]], *, pages: int = FETCH_MAX_PAG
     return enriched
 
 
-def try_facts_answer(command: str, *, registry: Any | None = None) -> str | None:
-    """Сначала спросить скилл facts (курс/погода); None — пусть идёт поиск."""
-    from kivi.skills.facts_intent import classify
+def try_facts_answer(
+    command: str, *, registry: Any | None = None, router: Any | None = None
+) -> str | None:
+    """Сначала спросить скилл facts (курс/крипта/погода); None — пусть идёт поиск."""
+    from kivi.skills.facts_intent import resolve
 
-    params = classify(command)
+    params = resolve(None, command)
     if params is None:
         return None
     try:
@@ -328,10 +330,17 @@ def try_facts_answer(command: str, *, registry: Any | None = None) -> str | None
     except Exception as exc:  # noqa: BLE001 - скилл не должен ломать поиск
         logger.warning("поиск: facts недоступен: {}: {}", type(exc).__name__, exc)
         return None
-    text = " ".join(str(answer or "").split())
-    if not text or text == FALLBACK_MARKER or text.startswith("Скилл «facts»"):
-        logger.info("поиск: facts не дал цифры — иду в поиск")
+    raw = str(answer or "").strip()
+    if not raw or raw == FALLBACK_MARKER or raw.startswith("Скилл «facts»"):
+        logger.info("поиск: facts не дал данных — иду в поиск")
         return None
+    from kivi.skills.facts_compose import compose_answer, parse_payload
+
+    payload = parse_payload(raw)
+    if payload is None:
+        logger.info("поиск: facts вернул не структурированные данные — иду в поиск")
+        return None
+    text, _cost = compose_answer(command, payload, [], router=router)
     logger.info("поиск: ответ из facts: {!r}", text[:80])
     return text
 
@@ -540,8 +549,12 @@ def summarize_with_llm(
     history: list[dict[str, Any]] | None = None,
     *,
     router: Any | None = None,
+    task_type: str = "chat",
 ) -> str:
-    """Короткая сводка по результатам (task_type=chat). Нет данных -> NOT_FOUND."""
+    """Короткая сводка по результатам. Нет данных -> NOT_FOUND.
+
+    task_type="strong" — усиленная модель (guard повторного ответа).
+    """
     text = " ".join(str(query or "").split())
     if not text or not results:
         return NOT_FOUND
@@ -567,7 +580,7 @@ def summarize_with_llm(
     ]
     try:
         active_router = router if router is not None else _default_router()
-        result = active_router.complete(messages, task_type="chat")
+        result = active_router.complete(messages, task_type=task_type)
     except Exception as exc:  # noqa: BLE001 - сеть/бюджет/провайдер
         logger.warning("поиск: LLM не ответила: {}: {}", type(exc).__name__, exc)
         return NOT_FOUND
@@ -670,6 +683,7 @@ def answer_search(
     max_results: int | None = None,
     timeout: float | None = None,
     use_facts: bool = True,
+    summary_task_type: str = "chat",
 ) -> str:
     """Ответ из интернета: переформулировка -> поиск -> сводка, при NOT_FOUND вторая попытка.
 
@@ -686,7 +700,7 @@ def answer_search(
 
     # Курс/погода — сначала открытые API (facts), поиск только при сбое.
     if use_facts:
-        facts = try_facts_answer(text)
+        facts = try_facts_answer(text, router=router)
         if facts:
             return facts
 
@@ -700,7 +714,9 @@ def answer_search(
         logger.error("поиск: все бэкенды DDGS недоступны для {!r}", query[:60])
         return SEARCH_UNAVAILABLE_ANSWER
     logger.info("поиск: попытка 1 {!r} -> {} результатов", query, len(results))
-    summary = summarize_with_llm(query, results, hist, router=router)
+    summary = summarize_with_llm(
+        query, results, hist, router=router, task_type=summary_task_type
+    )
 
     if not results or summary == NOT_FOUND:
         query2 = reformulate_retry(text, query, hist, router=router)
@@ -718,7 +734,9 @@ def answer_search(
                 )
                 return SEARCH_UNAVAILABLE_ANSWER
             logger.info("поиск: попытка 2 {!r} -> {} результатов", query2, len(results2))
-            summary = summarize_with_llm(query2, results2, hist, router=router)
+            summary = summarize_with_llm(
+                query2, results2, hist, router=router, task_type=summary_task_type
+            )
             results = results2
         else:
             logger.info("поиск: уточняющий запрос не сформулирован")
