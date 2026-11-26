@@ -70,10 +70,13 @@ brain:
     strong: "anthropic/claude-sonnet-5.5"
   local: {model: qwen3-14b-instruct-q4_k_m, ctx: 8192, gpu_layers: all}
   routing:
-    chat: coder                  # «думающая» модель: gemini-4-hydrogen
-    intent: coder                # планировщик тоже coder, не flash
-    compose: cheap               # композиция facts/weather — дешёвый тир
-    summarize: cheap             # сводка поиска — дешёвый тир
+    # Дорогие ретраи из-за обрезки больше не нужны: шаблонные ответы лечатся
+    # сущностями/поправками/композицией, а не тиром. chat/intent — cheap;
+    # coder/strong доступны через эскалацию для сложных случаев.
+    chat: cheap
+    intent: cheap
+    compose: cheap
+    summarize: cheap
     memory: cheap
     code: opencode_cli
     vision: vision

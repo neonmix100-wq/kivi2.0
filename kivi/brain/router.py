@@ -52,6 +52,45 @@ DEFAULT_ESCALATION = {
 
 Verify = Callable[[str], bool]
 
+# Обрезка по max_tokens — не провал: режем до границы предложения.
+SENTENCE_END = ".!?…"
+MIN_ANSWER_CHARS = 2
+CYRILLIC_MIN_RATIO = 0.3
+
+
+def _trim_to_sentence(text: str) -> str:
+    """Обрезать текст до последней границы предложения (иначе до пробела)."""
+    value = str(text or "").rstrip()
+    if not value:
+        return ""
+    cut = max(value.rfind(ch) for ch in SENTENCE_END)
+    if cut >= 0:
+        return value[: cut + 1].strip()
+    space = value.rfind(" ")
+    if space > 0:
+        return value[:space].strip()
+    return value
+
+
+def _is_russian_enough(value: str) -> bool:
+    letters = [ch for ch in value if ch.isalpha()]
+    if not letters:
+        return False
+    cyrillic = sum(1 for ch in letters if ch.lower() in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
+    return cyrillic / len(letters) >= CYRILLIC_MIN_RATIO
+
+
+def default_verify(text: str, task_type: str = "chat") -> bool:
+    """Провал только на пустом/мусорном/не-русском ответе (chat, summarize)."""
+    value = " ".join(str(text or "").split())
+    if len(value) < MIN_ANSWER_CHARS:
+        return False
+    if not any(ch.isalpha() for ch in value):
+        return False
+    if task_type in ("chat", "summarize"):
+        return _is_russian_enough(value)
+    return True
+
 
 def complete_safe(
     router: Any,
@@ -299,6 +338,7 @@ class Router:
         attempts: int,
         cost_rub: float,
         ok: bool = True,
+        attempt_costs: list[float] | None = None,
     ) -> dict:
         annotated = dict(result)
         annotated.update(
@@ -309,6 +349,7 @@ class Router:
                 "task_type": task_type,
                 "attempts": attempts,
                 "cost_rub": float(cost_rub),
+                "attempt_costs": [float(item) for item in (attempt_costs or [])],
                 "ok": ok,
             }
         )
@@ -352,7 +393,9 @@ class Router:
             ok=True,
             attempt=1,
         )
-        passed = bool(result["text"]) and (verify(result["text"]) if verify else True)
+        passed_text = str(result.get("text") or "")
+        checker = verify or (lambda value: default_verify(value, "intent"))
+        passed = checker(passed_text)
         if not passed:
             logger.warning(
                 "Router: оркестратор не прошёл проверку — эскалация для intent запрещена"
@@ -366,6 +409,7 @@ class Router:
             attempts=1,
             cost_rub=cost,
             ok=passed,
+            attempt_costs=[float(cost)],
         )
 
     def _chain(self, start_tier: str) -> list[tuple[str, int]]:
@@ -388,6 +432,61 @@ class Router:
             chain.append((after_coder, limits.get(after_coder, 1)))
         return chain
 
+    def _attempt(
+        self,
+        messages: list[dict],
+        model: str,
+        tier: str,
+        task_type: str,
+        tools: list[dict] | None,
+        max_tokens: int | None,
+        attempt_no: int,
+    ) -> tuple[dict | None, float, BaseException | None]:
+        """Одна попытка вызова модели: цена пишется всегда, даже при провале."""
+        self._ensure_budget()
+        try:
+            result = self.provider.complete(
+                messages, model, tools=tools, max_tokens=max_tokens
+            )
+        except (ProviderUnavailable, ProviderError) as exc:
+            written = self.budget.record(
+                provider=self.provider.name,
+                model=model,
+                task_type=task_type,
+                cost_rub=0.0,
+                ok=False,
+                attempt=attempt_no,
+            )
+            logger.warning(
+                "Router: {} ({}) попытка {} провалилась: {} ({:.5f} руб)",
+                tier,
+                model,
+                attempt_no,
+                exc,
+                float(written),
+            )
+            return None, float(written), exc
+        written = self.budget.record(
+            provider=self.provider.name,
+            model=model,
+            task_type=task_type,
+            tokens_in=result["tokens_in"],
+            tokens_out=result["tokens_out"],
+            cost_rub=result["cost_rub"],
+            ok=True,
+            attempt=attempt_no,
+        )
+        logger.info(
+            "Router: {} ({}) попытка {} — {:.5f} руб, OUT={}, finish={}",
+            tier,
+            model,
+            attempt_no,
+            float(written),
+            result.get("tokens_out"),
+            result.get("finish_reason") or "-",
+        )
+        return result, float(written), None
+
     def _escalate(
         self,
         messages: list[dict],
@@ -400,10 +499,16 @@ class Router:
         entry_reason: str | None = None,
         max_tokens: int | None = None,
     ) -> dict:
-        """Пройти лестницу тиров, пока какая-то попытка не пройдёт проверку."""
+        """Пройти лестницу тиров; обрезка по max_tokens — НЕ провал.
+
+        Цена суммируется по ВСЕМ попыткам (провалы и эскалации включительно).
+        """
         chain = self._chain(start_tier)
         attempts_total = attempt_offset
+        attempt_costs: list[float] = []
+        total_cost = 0.0
         last_error: BaseException | None = None
+        checker = verify or (lambda value: default_verify(value, task_type))
 
         for index, (tier, limit) in enumerate(chain):
             model = self.tiers.get(tier)
@@ -411,50 +516,74 @@ class Router:
                 logger.warning("Router: тир {} не настроен в brain.tiers — пропускаю", tier)
                 continue
 
-            for attempt in range(1, max(1, limit) + 1):
-                self._ensure_budget()
+            for _attempt in range(1, max(1, limit) + 1):
                 attempts_total += 1
-                try:
-                    result = self.provider.complete(
-                        messages, model, tools=tools, max_tokens=max_tokens
-                    )
-                except (ProviderUnavailable, ProviderError) as exc:
-                    last_error = exc
-                    self.budget.record(
-                        provider=self.provider.name,
-                        model=model,
-                        task_type=task_type,
-                        cost_rub=0.0,
-                        ok=False,
-                        attempt=attempts_total,
-                    )
-                    logger.warning(
-                        "Router: {} ({}) попытка {} провалилась: {}",
-                        tier,
-                        model,
-                        attempts_total,
-                        exc,
-                    )
+                result, written, error = self._attempt(
+                    messages, model, tier, task_type, tools, max_tokens, attempts_total
+                )
+                attempt_costs.append(written)
+                total_cost += written
+                if result is None:
+                    last_error = error
                     continue
 
-                cost = self.budget.record(
-                    provider=self.provider.name,
-                    model=model,
-                    task_type=task_type,
-                    tokens_in=result["tokens_in"],
-                    tokens_out=result["tokens_out"],
-                    cost_rub=result["cost_rub"],
-                    ok=True,
-                    attempt=attempts_total,
-                )
-                text = result["text"]
-                passed = bool(text) and (verify(text) if verify else True)
-                if passed:
+                text = str(result.get("text") or "")
+                if str(result.get("finish_reason") or "") == "length":
+                    trimmed = _trim_to_sentence(text)
+                    if trimmed:
+                        if trimmed != text.strip():
+                            trimmed = f"{trimmed} …"
+                        result = dict(result)
+                        result["text"] = trimmed
+                        result["truncated"] = True
+                        text = trimmed
+                        logger.info(
+                            "Router: {} обрезан по max_tokens — режу по границе предложения",
+                            tier,
+                        )
+                    else:
+                        # Пусто после обрезки: ровно один повтор с двойным лимитом.
+                        retry_limit = int(max_tokens) * 2 if max_tokens else None
+                        logger.warning(
+                            "Router: {} после обрезки пусто — повтор (max_tokens={})",
+                            tier,
+                            retry_limit,
+                        )
+                        attempts_total += 1
+                        retry, written, error = self._attempt(
+                            messages,
+                            model,
+                            tier,
+                            task_type,
+                            tools,
+                            retry_limit,
+                            attempts_total,
+                        )
+                        attempt_costs.append(written)
+                        total_cost += written
+                        if retry is None:
+                            last_error = error
+                            continue
+                        text = str(retry.get("text") or "")
+                        if str(retry.get("finish_reason") or "") == "length":
+                            trimmed = _trim_to_sentence(text)
+                            if trimmed:
+                                if trimmed != text.strip():
+                                    trimmed = f"{trimmed} …"
+                                retry = dict(retry)
+                                retry["text"] = trimmed
+                                retry["truncated"] = True
+                                text = trimmed
+                        result = retry
+
+                if checker(text):
                     logger.info(
-                        "Router: ответ получен на тире {} ({}) после {} попыток",
+                        "Router: ответ получен на тире {} ({}) после {} попыток, "
+                        "итого {:.5f} руб",
                         tier,
                         model,
                         attempts_total,
+                        total_cost,
                     )
                     return self._annotate(
                         result,
@@ -463,7 +592,8 @@ class Router:
                         tier=tier,
                         task_type=task_type,
                         attempts=attempts_total,
-                        cost_rub=cost,
+                        cost_rub=total_cost,
+                        attempt_costs=attempt_costs,
                     )
                 last_error = RouterError(
                     f"проверка не пройдена на тире {tier} ({model})"

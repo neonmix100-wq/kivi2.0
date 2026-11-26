@@ -1080,14 +1080,14 @@ class WakeLoop:
                 wake_log.warning("роутер не задан — команду не обрабатываю: {!r}", command)
             elif hasattr(self.router, "complete_stream"):
                 for chunk in stream_safe(
-                    self.router, messages, task_type="chat", max_tokens=400
+                    self.router, messages, task_type="chat", max_tokens=600
                 ):
                     parts.append(chunk)
                     speaker.feed(chunk)
             else:
                 # Заглушки (например, DryRouter в смоуке) умеют только complete.
                 result = complete_safe(
-                    self.router, messages, task_type="chat", max_tokens=400
+                    self.router, messages, task_type="chat", max_tokens=600
                 )
                 self._cost["chat"] += float((result or {}).get("cost_rub") or 0.0)
                 text = str((result or {}).get("text") or "")
@@ -1172,13 +1172,13 @@ class WakeLoop:
                 wake_log.warning("роутер не задан — команду не обрабатываю: {!r}", command)
             elif speaker is not None and hasattr(self.router, "complete_stream"):
                 for chunk in stream_safe(
-                    self.router, messages, task_type="chat", max_tokens=400
+                    self.router, messages, task_type="chat", max_tokens=600
                 ):
                     parts.append(chunk)
                     speaker.feed(chunk)
             else:
                 result = complete_safe(
-                    self.router, messages, task_type="chat", max_tokens=400
+                    self.router, messages, task_type="chat", max_tokens=600
                 )
                 self._cost["chat"] += float((result or {}).get("cost_rub") or 0.0)
                 text = str((result or {}).get("text") or "")
@@ -1565,7 +1565,9 @@ class WakeLoop:
         def _build() -> str:
             from kivi.memory.inject import build_memory_block
 
-            return str(build_memory_block(query) or "")
+            # Семантика внутри ядра ограничена 0.5 с, чтобы гарантированно
+            # уложиться в общий бюджет 0.8 с и не потерять локальное ядро.
+            return str(build_memory_block(query, budget_s=0.5) or "")
 
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kivi-memory")
         try:
@@ -1577,7 +1579,19 @@ class WakeLoop:
                 "память: пропуск по бюджету {:.1f}с — отвечаю без блока памяти",
                 MEMORY_BUDGET_S,
             )
-            return ""
+            # Хотя бы локальное ядро: контекст не должен быть пустым.
+            # Берём именно ядро (файлы, без сети), а не общий build: так
+            # медленная семантика не тормозит turn повторно.
+            try:
+                from kivi.memory.inject import _core_block
+                from kivi.memory.vault import vault_root
+
+                core = str(_core_block(vault_root()) or "")
+            except Exception:  # noqa: BLE001 - память не критична
+                core = ""
+            if core:
+                wake_log.info("память: отдаю только локальное ядро ({} симв.)", len(core))
+            return core
         except Exception as exc:  # noqa: BLE001 - память не должна ломать диалог
             wake_log.warning("память: блок не собран: {}: {}", type(exc).__name__, exc)
             self._memory_ms = int((time.perf_counter() - started) * 1000.0)

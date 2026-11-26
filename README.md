@@ -266,7 +266,7 @@ fallback_local_and_warn`.
 | `audio` | `hostapi: Windows WASAPI`; input `Микрофон (fifine SC3)`; output `Наушники (2- Temple Pro Purple)`; capture 48000; target 16000; playback 48000; `soxr`; mono; block 32 мс; `aec: false` | Звук, устройства и ресемплинг |
 | `audio.echo` | `enabled: true`, `corr_threshold: 0.6`, `tail_ms: 600`, `max_delay_ms: 400` | Эхо-гейт |
 | `stt` | `primary: local`, `fallback: polza`, `model: large-v3-turbo`, `compute_type: int8_float16`, `language: ru`, `beam_size: 1` | Распознавание |
-| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing (`chat`/`intent` → **coder**, `compose`/`summarize`/`memory` → cheap), escalation 3→2→strong, `budget.monthly_rub: 3000`, `warn_at: 0.8`, `per_turn_warn_rub: 0.5`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
+| `brain` | orchestrator/tiers cheap/coder/vision/strong, routing (`chat`/`intent`/`compose`/`summarize`/`memory` → **cheap**; `code` → opencode_cli; `vision` → vision), escalation cheap→coder→strong (3→2), `budget.monthly_rub: 3000`, `warn_at: 0.8`, `per_turn_warn_rub: 0.5`, `timezone: Asia/Novosibirsk` | LLM-маршруты и деньги |
 | `brain.local` | `model: qwen3-14b-instruct-q4_k_m`, `ctx: 8192`, `gpu_layers: all` | Резервный локальный профиль |
 | `tts` | `primary: polza_gemini`, `google/gemini-3.8-flash-tts`, `voice: Leda`, `streaming: true`, `base64_response: true`, `audio_format: mp3` | Голос; голос менять нельзя |
 | `skills` | `dir: skills`, `installed_dir: skills/installed`, auto-disable 3, timeout 30 с; browser/vision/music/telegram/home/rag | Реестр и политика скиллов |
@@ -440,22 +440,32 @@ timeout 300 с.
 - Fast-path: «привет / спасибо / как дела» отвечаются из кэша
   `data/tts_cache/replies` без planner, LLM и синтеза — первый звук < 300 мс
   (`kivi/brain/fastpath.py` + `kivi/tts/replies.py`, прогрев в `kivi/main.py`).
-- Память в промпте: бюджет 0.8 с; не уложились — отвечаем без блока и пишем
-  «память: пропуск по бюджету» в `wake.log`.
-- Первый чанк TTS ≤ 60 символов; вводная звучит, только если LLM молчит
-  дольше 2.5 с и ни одного чанка ещё нет в очереди.
-- Озвучка по источнику: `source=text` молчит по умолчанию (`api.text_speaks: false`,
-  перекрывается `text_speaks` в `data/prefs.json`; тумблер «Озвучивать текстовые
-  ответы» в Чате и Настройках шлёт `set_text_speaks`), `source=voice` озвучивается
-  ВСЕГДА; напоминания и вводные — без изменений.
-- Лимиты OUT-токенов: planner 200 (при обрезке JSON — один повтор без лимита),
-  chat 400, compose 120, summarize 200. Компактный промпт планировщика:
+- Память в промпте: **локальное ядро отдаётся всегда и сразу** (profile.md +
+  schedule.md + tasks.md(open), обрезка ~600 токенов, без сети) — при непустом
+  vault контекст никогда не пустой; семантическое обогащение (top-k по
+  эмбеддингам) добавляется, только если уложилось в 0.5 с внутри общего бюджета
+  0.8 с, иначе пишется `память: ядро N симв, semantic skip` — ядро остаётся.
+- Обрезка ответа по `max_tokens` (`finish_reason=length`) — НЕ провал: текст
+  режется до последней границы предложения (`. ! ? …`) с «…»; повтор с
+  `max_tokens*2` делается только если после обрезки пусто. `verify` падает лишь
+  на пустом/мусорном/не-русском ответе (chat/summarize).
+- Лимиты OUT-токенов: planner 200 (повтор после обрезки — `max_tokens*2`),
+  chat 600, compose 120, summarize 200. Компактный промпт планировщика:
   каталог `name + 3 triggers`, манифест ~120 токенов, история — последняя пара
   реплик, IN < 800 токенов.
 - Кэш TTS для ответов скиллов: `data/tts_cache/skills/<sha256(text)>.mp3` без
   ограничения длины (детерминированные ответы), стриминговый чат не кэшируется.
 - Стоимость: turn-лог пишет `cost=…₽` и `cost_breakdown={planner, compose, chat,
-  tts, vision, search}`; если turn дороже `brain.budget.per_turn_warn_rub` — WARNING.
+  tts, vision, search}`; цена **каждой** попытки пишется отдельной строкой
+  (`Router: <тир> попытка N — 0.xxxxx руб`), turn-cost и breakdown суммируют все
+  попытки, включая провальные и эскалации; если turn дороже
+  `brain.budget.per_turn_warn_rub` — WARNING.
+- Озвучка по источнику: `source=text` молчит по умолчанию (`api.text_speaks: false`,
+  перекрывается `text_speaks` в `data/prefs.json`; тумблер «Озвучивать текстовые
+  ответы» в Чате и Настройках шлёт `set_text_speaks`), `source=voice` озвучивается
+  ВСЕГДА; напоминания и вводные — без изменений.
+- Первый чанк TTS ≤ 60 символов; вводная звучит, только если LLM молчит
+  дольше 2.5 с и ни одного чанка ещё нет в очереди.
 - Поиск: `reformulate_query(command, history)` → чистый запрос; retry при
   `NOT_FOUND` с ДРУГИМ запросом (совпал — retry пропускаем) и без кэша; summary
   с историей; по сырой реплике не искать.
@@ -465,8 +475,9 @@ timeout 300 с.
 - Факты из открытых API: скилл `facts` (валюта — `open.er-api.com`, крипта —
   `api.coingecko.com`, погода — `open-meteo.com`) возвращает СТРУКТУРИРОВАННЫЙ
   JSON `{source, kind, values, updated}` без ключей; фразу формулирует
-  `Router.complete(task_type=chat)` (тир coder) по промпту «используй ТОЛЬКО
-  данные» (`kivi/skills/facts_compose.py`), поэтому шаблонных ответов нет.
+  `Router.complete(task_type=compose)` (тир **cheap**, эскалация при провале) по
+  промпту «используй ТОЛЬКО данные» (`kivi/skills/facts_compose.py`), поэтому
+  шаблонных ответов нет.
   Сущности (`coin/base/quote/city`) из args приоритетны; если сущность названа,
   но не маппится — `FALLBACK_MARKER` и маршрут `search`, дефолтная пара не
   подставляется. Жадных keyword-правил в планировщике нет: курс/погоду решает

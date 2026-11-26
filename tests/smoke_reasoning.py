@@ -309,12 +309,12 @@ def main() -> int:
             str(args),
         )
 
-        print("\n--- 5) config: chat/intent -> coder ---")
+        print("\n--- 5) config: chat/intent -> cheap ---")
         routing = (load_config().model_dump().get("brain") or {}).get("routing") or {}
         print(f"    routing={routing}")
-        ok &= check("chat = coder", routing.get("chat") == "coder", str(routing.get("chat")))
+        ok &= check("chat = cheap", routing.get("chat") == "cheap", str(routing.get("chat")))
         ok &= check(
-            "intent = coder", routing.get("intent") == "coder", str(routing.get("intent"))
+            "intent = cheap", routing.get("intent") == "cheap", str(routing.get("intent"))
         )
 
         print("\n--- 6) погода: факт по названному городу ---")

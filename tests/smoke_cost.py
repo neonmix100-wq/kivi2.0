@@ -256,8 +256,8 @@ def main() -> int:
         ok &= check("cost_breakdown.tts = 0", loop._cost.get("tts") == 0.0, str(loop._cost))
         ok &= check("в логе есть cost_breakdown", logs.has("cost_breakdown={"))
         ok &= check(
-            "chat max_tokens=400",
-            bool(router.calls) and router.calls[-1]["max_tokens"] == 400,
+            "chat max_tokens=600",
+            bool(router.calls) and router.calls[-1]["max_tokens"] == 600,
             str(router.calls[-1]["max_tokens"] if router.calls else None),
         )
 
@@ -305,8 +305,8 @@ def main() -> int:
         routing = Router(get_settings()).routing
         ok &= check("compose -> cheap", routing.get("compose") == "cheap", str(routing))
         ok &= check(
-            "chat/intent остаются coder",
-            routing.get("chat") == "coder" and routing.get("intent") == "coder",
+            "chat/intent -> cheap (эскалация для сложного)",
+            routing.get("chat") == "cheap" and routing.get("intent") == "cheap",
             str(routing),
         )
         ok &= check("compose вернул текст", bool(text) and cost >= 0.0)

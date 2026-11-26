@@ -168,6 +168,7 @@ class PolzaProvider:
             choice = body["choices"][0]
             message = choice.get("message") or {}
             text = message.get("content") or ""
+            finish_reason = str(choice.get("finish_reason") or "")
             usage = body.get("usage") or {}
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError(
@@ -182,6 +183,7 @@ class PolzaProvider:
             "tokens_in": int(usage.get("prompt_tokens") or 0),
             "tokens_out": int(usage.get("completion_tokens") or 0),
             "cost_rub": float(cost) if cost is not None else None,
+            "finish_reason": finish_reason,
             "raw": body,
         }
 

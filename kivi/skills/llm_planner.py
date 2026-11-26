@@ -414,13 +414,13 @@ def plan_with_llm(
         )
         if truncated:
             # Модель ушла в рассуждения и JSON обрезался по max_tokens=200.
-            # Один повтор с запасом: качество важнее формального лимита.
+            # Один повтор с двойным лимитом (400): дешевле, чем безлимит.
             logger.warning(
-                "планировщик: ответ обрезан по max_tokens=200 — повтор без лимита"
+                "планировщик: ответ обрезан по max_tokens=200 — повтор с max_tokens=400"
             )
             try:
                 retry = complete_safe(
-                    active_router, messages, task_type="intent", max_tokens=None
+                    active_router, messages, task_type="intent", max_tokens=400
                 )
             except Exception as exc:  # noqa: BLE001 - сеть/бюджет
                 logger.warning(
