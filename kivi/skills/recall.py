@@ -18,6 +18,7 @@ from loguru import logger
 __all__ = [
     "QueryEntities",
     "as_entities",
+    "date_refs_from_text",
     "date_refs_to_dates",
     "extract_entities",
     "extract_keywords",
@@ -215,6 +216,24 @@ def date_refs_to_dates(refs: list[str], now: datetime) -> set[date]:
     result: set[date] = set()
     for raw in refs:
         ref = _norm(raw)
+        if ref in _WEEKEND_REF_SET:
+            result.update(
+                today + timedelta(days=offset)
+                for offset in range(7)
+                if (today + timedelta(days=offset)).weekday() >= 5
+            )
+            continue
+        if ref in _WEEKDAY_REF_SET:
+            result.update(
+                today + timedelta(days=offset)
+                for offset in range(7)
+                if (today + timedelta(days=offset)).weekday() < 5
+            )
+            continue
+        if ref in _MULTI_DAY_REFS:
+            start, count = _MULTI_DAY_REFS[ref]
+            result.update(today + timedelta(days=start + offset) for offset in range(count))
+            continue
         if ref in _DATE_ALIASES:
             result.add(today + timedelta(days=_DATE_ALIASES[ref]))
             continue
@@ -241,6 +260,48 @@ def date_refs_to_dates(refs: list[str], now: datetime) -> set[date]:
             days = (target - today.weekday()) % 7
             result.add(today + timedelta(days=days))
     return result
+
+
+_WEEK_REFS = (
+    "week", "неделя", "неделе", "неделю", "недели", "на неделе", "эта неделя",
+)
+_WEEKEND_REFS = (
+    "weekend", "выходные", "выходным", "выходных", "на выходных", "сб-вс",
+)
+_WEEKDAY_REFS = (
+    "weekdays", "будни", "будням", "по будням", "рабочие дни", "рабочих днях",
+)
+_MULTI_DAY_REFS: dict[str, tuple[int, int]] = {ref: (0, 7) for ref in _WEEK_REFS}
+_WEEKEND_REF_SET = set(_WEEKEND_REFS)
+_WEEKDAY_REF_SET = set(_WEEKDAY_REFS)
+
+
+def date_refs_from_text(command: str) -> list[str]:
+    """Детерминированно вытащить даты из текста (страховка от пустой LLM)."""
+    text = _norm(command)
+    refs: list[str] = []
+    if "послезавтра" in text:
+        refs.append("послезавтра")
+    elif "завтра" in text:
+        refs.append("завтра")
+    elif "сегодня" in text:
+        refs.append("сегодня")
+    if re.search(r"\bнедел[яиюе]\b", text):
+        refs.append("неделя")
+    if re.search(r"\bвыходн\w*", text):
+        refs.append("выходные")
+    if re.search(r"\bбудн\w*", text) or "рабочие дни" in text:
+        refs.append("будни")
+    weekday = _WEEKDAY_RE.search(text)
+    if weekday:
+        refs.append(weekday.group(1).lower())
+    for dot in _DOT_DATE_RE.finditer(text):
+        refs.append(dot.group(0))
+    unique: list[str] = []
+    for ref in refs:
+        if ref not in unique:
+            unique.append(ref)
+    return unique
 
 
 def _date_in_text(text: object, targets: set[date], now: datetime) -> bool | None:

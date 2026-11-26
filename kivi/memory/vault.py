@@ -25,6 +25,7 @@ __all__ = [
     "add_fact",
     "add_preference",
     "add_schedule",
+    "add_schedule_line",
     "add_task",
     "ensure_vault",
     "fact_exists",
@@ -154,7 +155,12 @@ def normalize_item(text: str) -> str:
 
 
 def iter_schedule(path: str | Path | None = None) -> list[tuple[str, str]]:
-    """Записи schedule.md как (when, what)."""
+    """Записи schedule.md как (when, what); файл предварительно канонизируется."""
+    from kivi.memory.schedule import ensure_canonical
+
+    note = note_path("schedule", "", path)
+    if note.exists():
+        ensure_canonical(note)
     text = read_note("schedule", "", path)
     found: list[tuple[str, str]] = []
     for line in text.splitlines():
@@ -175,48 +181,69 @@ def iter_tasks(path: str | Path | None = None) -> list[tuple[str, str]]:
     return found
 
 
-def _canonical_when(when: str) -> str:
-    """Привести частые формулировки LLM к виду «будни 09:00»."""
-    raw = " ".join(str(when).split())
-    lowered = raw.lower().replace("ё", "е")
-    time_match = re.search(r"\b([01]?\d|2[0-3])[:.](\d{2})", raw)
-    time_text = (
-        f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
-        if time_match
-        else ""
+def _schedule_key(line: str) -> tuple:
+    """Ключ дедупликации: у канонических строк — разобранное правило."""
+    from kivi.memory.schedule import parse_rule
+
+    rule = parse_rule(line)
+    if rule is None:
+        return ("raw", normalize_item(line))
+    return (
+        tuple(sorted(rule.days or [])),
+        (rule.date.month, rule.date.day) if rule.date else None,
+        rule.start,
+        rule.end,
+        normalize_item(rule.what),
     )
-    if not time_text:
-        bare_hour = re.search(r"\bв\s*([01]?\d|2[0-3])(?:\s|$)", lowered)
-        if bare_hour:
-            time_text = f"{int(bare_hour.group(1)):02d}:00"
-    if time_text and "будн" in lowered:
-        return f"будни {time_text}"
-    if time_text and ("каждый день" in lowered or "ежедневно" in lowered):
-        return f"ежедневно {time_text}"
-    return raw
 
 
-def add_schedule(when: str, what: str, path: str | Path | None = None) -> bool:
-    """Добавить строку расписания; False — пусто или дубликат."""
-    when_text = _canonical_when(str(when or ""))
-    what_text = " ".join(str(what or "").split())
-    if not when_text or not what_text:
+def add_schedule_line(line: str, path: str | Path | None = None) -> bool:
+    """Добавить готовую строку: канон сохраняется как есть, старое мигрируется.
+
+    Если строку не удалось нормализовать, текст НЕ теряется: пишется с
+    префиксом «[?] » и WARNING (recall покажет её только в общем запросе).
+    """
+    from kivi.memory.schedule import ensure_canonical, migrate_legacy
+
+    text = " ".join(str(line or "").split())
+    if not text:
         return False
+    canonical = migrate_legacy(text)
+    if canonical is None:
+        stripped = re.sub(r"^\s*[-*]\s*", "", text)
+        canonical = f"- {stripped}" if stripped.startswith("[?]") else f"- [?] {stripped}"
+        logger.warning("schedule: строка не нормализовалась, сохранил как «[?]»: {}", text[:120])
     root = ensure_vault(path)
-    target = normalize_item(f"{when_text} {what_text}")
-    for existing_when, existing_what in iter_schedule(root):
-        if normalize_item(f"{existing_when} {existing_what}") == target:
-            logger.debug("Vault: расписание уже есть — [{}] {}", when_text, what_text)
-            return False
+    key = _schedule_key(canonical)
+    note = note_path("schedule", "", root)
+    if note.exists():
+        ensure_canonical(note)
     content = read_note("schedule", "", root)
+    for existing in content.splitlines():
+        if _ENTRY_RE.match(existing) and _schedule_key(existing) == key:
+            logger.debug("Vault: расписание уже есть — {}", canonical)
+            return False
     if not content.strip():
         content = "# Расписание\n"
     if not content.endswith("\n"):
         content += "\n"
-    content += f"- [{when_text}] {what_text}\n"
+    content += canonical.strip() + "\n"
     write_note("schedule", "", content, root)
-    logger.info("Vault: расписание добавлено [{}] {}", when_text, what_text[:100])
+    logger.info("Vault: расписание добавлено {}", canonical[:140])
     return True
+
+
+def add_schedule(when: str, what: str, path: str | Path | None = None) -> bool:
+    """Добавить строку расписания; False — пусто или дубликат.
+
+    `when` может быть каноническим («ПН-ПТ 15:00») или свободным
+    («каждый будний день в 15:00»); нормализация — в kivi/memory/schedule.
+    """
+    when_text = " ".join(str(when or "").split())
+    what_text = " ".join(str(what or "").split())
+    if not when_text or not what_text:
+        return False
+    return add_schedule_line(f"{when_text} {what_text}", path)
 
 
 def add_task(what: str, status: str = "open", path: str | Path | None = None) -> bool:

@@ -311,6 +311,13 @@ class SkillContext:
 
         return bool(add_schedule(when, what, path=root))
 
+    def vault_add_schedule_line(self, line: str) -> bool:
+        """Добавить готовую каноническую строку расписания. Нужен tool self_memory."""
+        root = self._memory_root()
+        from kivi.memory.vault import add_schedule_line
+
+        return bool(add_schedule_line(line, path=root))
+
     def vault_add_task(self, what: str) -> bool:
         """Добавить задачу в memory/tasks.md. Нужен tool self_memory."""
         root = self._memory_root()
@@ -355,6 +362,13 @@ class SkillContext:
 
         entities = extract_entities(str(command))
         return {"keywords": entities.keywords, "date_refs": entities.date_refs}
+
+    def extract_schedule(self, command: str) -> dict[str, str]:
+        """LLM cheap/intent: days/start/end/what события. Нужен llm_intent."""
+        self._require_tool("llm_intent")
+        from kivi.skills.schedule_extract import extract_schedule
+
+        return dict(extract_schedule(str(command)) or {})
 
     def reminders_clear(self) -> int:
         """Удалить pending-напоминания. Нужен tool reminders_write."""

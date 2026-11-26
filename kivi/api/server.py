@@ -442,10 +442,15 @@ class ApiServer:
 
     def memory_lines(self, kind: str = "profile") -> list[str]:
         """Строки заметки/папки для UI и внешних клиентов."""
-        from kivi.memory.vault import list_notes, read_note, vault_root
+        from kivi.memory.schedule import ensure_canonical
+        from kivi.memory.vault import list_notes, note_path, read_note, vault_root
 
         valid = self._memory_kind(kind)
         root = vault_root()
+        if valid == "schedule":
+            note = note_path("schedule", "", root)
+            if note.exists():
+                ensure_canonical(note)
         if valid in ("profile", "schedule", "tasks"):
             text = read_note(valid, "", root)
             return [
@@ -489,6 +494,38 @@ class ApiServer:
                 name = path.name
             items.append({"name": name, "text": text[:2000]})
         return items
+
+    def add_schedule_event(
+        self, days: str, start: str, end: str, what: str
+    ) -> dict[str, Any]:
+        """Добавить событие в расписание из UI (нормализация общим модулем)."""
+        from kivi.memory.schedule import canonical_from_text, normalize
+        from kivi.memory.vault import add_schedule_line, vault_root
+
+        title = " ".join(str(what or "").split())
+        if not title:
+            return {"ok": False, "error": "пустой текст события"}
+        try:
+            line = normalize(days, start, end or start, title)
+        except ValueError:
+            line = canonical_from_text(f"{days} {start} {end} {title}", "")
+            if not line:
+                return {
+                    "ok": False,
+                    "error": "дни/время не распознаны (пример: ПН-ПТ, 19:00, 23:00)",
+                }
+        try:
+            added = add_schedule_line(line, path=vault_root())
+        except Exception as exc:  # noqa: BLE001 - UI не должен падать
+            logger.warning("api: add_schedule не удался: {}: {}", type(exc).__name__, exc)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": True,
+            "added": bool(added),
+            "line": line,
+            "kind": "schedule",
+            "lines": self.memory_lines("schedule"),
+        }
 
     def _skill_registry(self):
         """Реестр скиллов из ядра или общий (для UI)."""
@@ -912,6 +949,15 @@ class ApiServer:
                     "lines": self.memory_lines(kind),
                 },
             )
+        elif command == "add_schedule":
+            result = await asyncio.to_thread(
+                self.add_schedule_event,
+                str(message.get("days") or ""),
+                str(message.get("start") or ""),
+                str(message.get("end") or ""),
+                str(message.get("what") or ""),
+            )
+            await self._reply(websocket, result)
         elif command == "send_text":
             text = str(message.get("text") or "")
             result = await asyncio.to_thread(self.send_text, text)

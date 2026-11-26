@@ -36,7 +36,9 @@ const ui = {
   gapsBody: $('#gaps-body'),
   gapsState: $('#gaps-state'),
   scheduleForm: $('#schedule-form'),
-  scheduleWhen: $('#schedule-when'),
+  scheduleDays: $('#schedule-days'),
+  scheduleStart: $('#schedule-start'),
+  scheduleEnd: $('#schedule-end'),
   scheduleWhat: $('#schedule-what'),
   scheduleAdd: $('#btn-schedule-add'),
   chatFeed: $('#chat-feed'),
@@ -923,12 +925,32 @@ function initSchedule() {
       if (ui.scheduleForm) ui.scheduleForm.hidden = !ui.scheduleForm.hidden;
     });
   }
-  if (save) {
-    save.addEventListener('click', () => {
-      setMemoryState('Форма добавления события — заглушка; используй голосовую команду «запомни…».');
-      if (ui.scheduleForm) ui.scheduleForm.hidden = true;
-    });
-  }
+  if (!save) return;
+  save.addEventListener('click', () => {
+    const days = ui.scheduleDays ? ui.scheduleDays.value.trim() : '';
+    const start = ui.scheduleStart ? ui.scheduleStart.value.trim() : '';
+    const end = ui.scheduleEnd ? ui.scheduleEnd.value.trim() : '';
+    const what = ui.scheduleWhat ? ui.scheduleWhat.value.trim() : '';
+    if (!days || !start || !what) {
+      setMemoryState('Заполни: дни (ПН-ПТ или будни), старт (19:00) и текст события.');
+      return;
+    }
+    setMemoryState('Добавляю событие…');
+    request('add_schedule', { days, start, end, what }, 8000)
+      .then((reply) => {
+        if (!reply.ok) {
+          setMemoryState(`не добавила: ${reply.error || 'ошибка'}`);
+          return;
+        }
+        setMemoryState(
+          `${reply.added ? 'добавлено' : 'уже было'}: ${reply.line || ''}`.trim()
+        );
+        if (ui.scheduleWhat) ui.scheduleWhat.value = '';
+        if (ui.scheduleForm) ui.scheduleForm.hidden = true;
+        loadMemory('schedule');
+      })
+      .catch((error) => setMemoryState(`ошибка: ${error.message || error}`));
+  });
 }
 
 /* --- инициализация интерфейса --- */

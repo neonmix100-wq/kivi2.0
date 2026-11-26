@@ -143,8 +143,9 @@ def main() -> int:
     print("tasks.md:\n" + tasks_text.strip())
 
     ok &= check(
-        "schedule содержит будни 09:00 и стендап",
-        "будни 09:00" in schedule_text and "стендап" in schedule_text.lower(),
+        "schedule содержит канон [ПН-ПТ 09:00] и стендап",
+        "[ПН-ПТ 09:00]" in schedule_text and "стендап" in schedule_text.lower(),
+        schedule_text.strip(),
     )
     ok &= check(
         "tasks содержит open-задачу",

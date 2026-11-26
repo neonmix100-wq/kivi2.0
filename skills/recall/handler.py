@@ -8,21 +8,29 @@ date_refs. Фильтр — подстрока по keywords; date_refs огра
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
+from kivi.memory.schedule import (
+    DAY_RU_SHORT,
+    ScheduleRule,
+    format_days_ru,
+    format_minutes,
+    is_raw,
+    matches,
+    parse_rule,
+)
 from kivi.skills.broker import project_timezone
 from kivi.skills.recall import (
     QueryEntities,
     as_entities,
+    date_refs_from_text,
     date_refs_to_dates,
     keyword_in_text,
     reminder_matches_date,
-    schedule_matches_date,
     task_matches_date,
 )
 
 _ENTRY_RE = re.compile(r"^\s*[-*]\s*\[([^\]]+)\]\s*(.+?)\s*$")
-_TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:.](\d{2})")
 
 
 def _read(ctx, name: str) -> str:
@@ -41,13 +49,47 @@ def _entries(text: str) -> list[tuple[str, str]]:
     return found
 
 
-def _schedule_phrase(when: str, what: str) -> str:
-    match = _TIME_RE.search(when)
-    if match:
-        hour = int(match.group(1))
-        minute = match.group(2)
-        return f"{what} в {hour:02d}:{minute}"
-    return f"{what} ({when})"
+def _rule_time(rule: ScheduleRule) -> str:
+    if rule.start == rule.end:
+        return format_minutes(rule.start)
+    return f"{format_minutes(rule.start)}–{format_minutes(rule.end)}"
+
+
+def _rule_days(rule: ScheduleRule) -> str:
+    if rule.date is not None:
+        return f"{rule.date.day:02d}.{rule.date.month:02d}"
+    return format_days_ru(rule.days)
+
+
+def _date_label(target: date, now: datetime) -> str:
+    name = DAY_RU_SHORT[target.weekday()]
+    diff = (target - now.date()).days
+    if diff == 0:
+        return f"Сегодня ({name})"
+    if diff == 1:
+        return f"Завтра ({name})"
+    if diff == 2:
+        return f"Послезавтра ({name})"
+    return f"{target.day:02d}.{target.month:02d} ({name})"
+
+
+def _schedule_rules(text: str) -> list[ScheduleRule]:
+    """Все строки расписания: канон — как правило, «[?]» — как raw-запись."""
+    found: list[ScheduleRule] = []
+    for line in str(text).splitlines():
+        if not line.strip().startswith(("-", "*")):
+            continue
+        rule = parse_rule(line)
+        if rule is not None:
+            found.append(rule)
+            continue
+        if is_raw(line):
+            match = _ENTRY_RE.match(line)
+            if match:
+                found.append(
+                    ScheduleRule(None, None, 0, 0, match.group(2).strip(), "[?]")
+                )
+    return found
 
 
 def _now(ctx) -> datetime:
@@ -87,31 +129,42 @@ def handle(ctx, **args) -> str:
     command = " ".join(str(args.get("command") or "").split())
     entities = _entities(ctx, command)
     keywords = list(entities.keywords)
+    refs = list(entities.date_refs)
+    # LLM могла не вернуть date_refs — добираем детерминированно из текста.
+    for ref in date_refs_from_text(command):
+        if ref not in refs:
+            refs.append(ref)
     current = _now(ctx)
-    targets = date_refs_to_dates(entities.date_refs, current)
+    targets = date_refs_to_dates(refs, current)
     filtered = bool(keywords or targets)
 
-    schedule_all = _entries(_read(ctx, "schedule.md"))
+    schedule_all = _schedule_rules(_read(ctx, "schedule.md"))
     tasks_all = [
         what
         for status, what in _entries(_read(ctx, "tasks.md"))
         if status.lower() == "open"
     ]
     try:
-        reminders_all = [
-            item
-            for item in ctx.reminders_list()
-            if not item.get("done")
-        ]
+        reminders_all = [item for item in ctx.reminders_list() if not item.get("done")]
     except Exception:  # noqa: BLE001 - старый контекст/нет напоминаний
         reminders_all = []
 
-    schedule = [
-        (when, what)
-        for when, what in schedule_all
-        if (not keywords or keyword_in_text(f"{when} {what}", keywords))
-        and (not targets or schedule_matches_date(when, targets, current))
-    ]
+    def keyword_ok(rule: ScheduleRule) -> bool:
+        if not keywords:
+            return True
+        return keyword_in_text(f"{_rule_days(rule)} {rule.what}", keywords)
+
+    schedule_rules = [rule for rule in schedule_all if keyword_ok(rule)]
+
+    dated: list[tuple[date, ScheduleRule]] = []
+    if targets:
+        for rule in schedule_rules:
+            if rule.days is None and rule.date is None:
+                continue  # «[?]» показываем только в общем запросе
+            for target in sorted(targets):
+                if matches(rule, target):
+                    dated.append((target, rule))
+
     tasks = [
         what
         for what in tasks_all
@@ -132,18 +185,49 @@ def handle(ctx, **args) -> str:
         and (not targets or reminder_matches_date(item, targets, current))
     ]
 
-    found = len(schedule) + len(tasks) + len(reminders)
-    ctx.log(f"recall: фильтрую по {keywords} -> найдено {found} записей")
+    vault_has_records = bool(schedule_all or tasks_all or reminders_all)
+    found = len(dated or schedule_rules) + len(tasks) + len(reminders)
+    if targets:
+        found = len(dated) + len(tasks) + len(reminders)
+    ctx.log(f"recall: фильтрую по {keywords}/{sorted(targets)} -> найдено {found} записей")
 
     if not found:
-        if keywords:
+        if keywords and not targets:
             return f"Не нашла в твоих задачах про {_not_found_word(keywords[0])}"
+        if not vault_has_records:
+            return "Пока пусто."
+        if targets:
+            if len(targets) == 1:
+                head = _date_label(next(iter(targets)), current)
+                return f"{head}: ничего нет."
+            return "На этот период ничего нет."
         return "Пока пусто."
 
     parts: list[str] = []
-    if schedule:
-        phrases = "; ".join(_schedule_phrase(when, what) for when, what in schedule)
-        parts.append(f"Расписание: {phrases}.")
+    if targets:
+        groups: dict[date, list[ScheduleRule]] = {}
+        for target, rule in dated:
+            groups.setdefault(target, []).append(rule)
+        for target in sorted(groups):
+            items = "; ".join(
+                f"{rule.what} {_rule_time(rule)}" for rule in groups[target]
+            )
+            parts.append(f"{_date_label(target, current)}: {items}.")
+    else:
+        canonical = [rule for rule in schedule_rules if rule.days or rule.date]
+        raw_only = [rule for rule in schedule_rules if not rule.days and not rule.date]
+        if canonical:
+            phrases = "; ".join(
+                f"{rule.what} — {_rule_days(rule)} {_rule_time(rule)}"
+                for rule in canonical
+            )
+            parts.append(f"Расписание: {phrases}.")
+        if raw_only:
+            phrases = "; ".join(f"{rule.what} (без времени)" for rule in raw_only)
+            parts.append(f"Не разобрала: {phrases}.")
+        if not canonical and not raw_only:
+            parts.insert(0, "Расписание пусто.")
+
     if tasks:
         if filtered:
             parts.append("Задачи: " + "; ".join(tasks) + ".")
@@ -156,8 +240,7 @@ def handle(ctx, **args) -> str:
         )
         parts.append(f"Напоминания: {phrases}.")
     if not filtered:
-        if not schedule:
-            parts.insert(0, "Расписание пусто.")
         if not tasks:
-            parts.insert(-1 if reminders else len(parts), "Открытых задач: 0.")
+            parts.append("Открытых задач: 0.")
     return " ".join(parts)
+

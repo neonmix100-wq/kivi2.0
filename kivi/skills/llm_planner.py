@@ -55,8 +55,10 @@ SYSTEM_PROMPT = """Ты — планировщик умений Киви. По �
   search — живые данные (курс, погода, новости, цены, факты кто/что/когда/сколько);
   action_gap — действие без инструмента (устройство, письмо, файл, покупка).
 - «запомни/в расписание/поставь задачу/запиши» -> remember, args {kind:
-  schedule|task|preference|fact, what, when?}: со временем — schedule, «купи/сделать» —
-  task, «люблю/предпочитаю» — preference, иначе fact.
+  schedule|task|preference|fact, what, when?}. Для schedule давай days
+  (ПН-ПТ/ВС-ПТ/будни/СБ,ВС/ДД.ММ), start и end (HH:MM), what. «с X по Y» ->
+  days "ВС-ПТ", «по будням» -> "будни". Со временем — schedule,
+  «купи/сделать» — task, «люблю/предпочитаю» — preference, иначе fact.
 - «напомни в/разбуди в» -> reminders {time, what}; без времени -> remember {kind: task, what}.
 - «во сколько/когда/что завтра/что у меня сегодня» про планы -> recall;
   «мои задачи/список дел» -> tasks_list.

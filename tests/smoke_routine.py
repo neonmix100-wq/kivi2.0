@@ -203,12 +203,15 @@ def main() -> int:
     print("remember schedule:", reply_schedule)
     schedule_text = read_note("schedule", "", vault)
     ok &= check(
-        "remember schedule -> schedule.md",
-        "будни 15:00" in schedule_text and "стендап" in schedule_text.lower(),
+        "remember schedule -> канон в schedule.md",
+        "[ПН-ПТ 15:00] стендап" in schedule_text,
+        schedule_text.strip(),
     )
     ok &= check(
-        "ответ remember schedule",
-        "Запомнила" in reply_schedule and "по будням" in reply_schedule,
+        "ответ remember schedule (дни + время)",
+        "Запомнила" in reply_schedule
+        and "будни 15:00" in reply_schedule
+        and "стендап" in reply_schedule,
         reply_schedule,
     )
 
